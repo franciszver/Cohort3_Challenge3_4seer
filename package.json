@@ -1,0 +1,38 @@
+{
+  "name": "4seer-mvp-video-editor",
+  "version": "1.0.0",
+  "description": "4Seer MVP Video Editor for Windows",
+  "main": "src/main.js",
+  "author": "4Seer Team",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "lint": "echo Lint not configured"
+  },
+  "build": {
+    "appId": "com.4seer.mvpvideoeditor",
+    "productName": "4Seer",
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "extraResources": [
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": ["**/*"]
+      }
+    ],
+    "files": [
+      "src/**/*",
+      "package.json"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^25.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "dependencies": {}
+}
+
+
