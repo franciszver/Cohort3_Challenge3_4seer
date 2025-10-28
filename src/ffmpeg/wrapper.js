@@ -113,6 +113,51 @@ async function exportConcat(clips, outputPath, onProgress) {
   return finalPath;
 }
 
-module.exports = { getFFmpegPath, exportConcat, cancelExport };
+/**
+ * Extract thumbnails from a video file
+ * @param {string} videoPath - Path to the video file
+ * @param {string} outputDir - Directory to save thumbnails
+ * @param {number} count - Number of thumbnails to extract
+ * @param {number} duration - Video duration in seconds
+ * @returns {Promise<string[]>} - Array of thumbnail file paths
+ */
+async function extractThumbnails(videoPath, outputDir, count, duration) {
+  const ffmpegPath = getFFmpegPath();
+  const thumbnails = [];
+  
+  // Ensure output directory exists
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+  
+  // Calculate interval between thumbnails
+  const interval = duration / (count + 1);
+  
+  // Extract thumbnails at specific timestamps
+  for (let i = 0; i < count; i++) {
+    const timestamp = interval * (i + 1);
+    const outputPath = path.join(outputDir, `thumb_${i}.jpg`);
+    
+    const args = [
+      '-ss', String(timestamp),
+      '-i', videoPath,
+      '-vframes', '1',
+      '-q:v', '2',
+      '-vf', 'scale=80:-1',
+      outputPath
+    ];
+    
+    try {
+      await spawnPromise(ffmpegPath, args);
+      thumbnails.push(outputPath);
+    } catch (err) {
+      console.error('Failed to extract thumbnail:', err);
+    }
+  }
+  
+  return thumbnails;
+}
+
+module.exports = { getFFmpegPath, exportConcat, cancelExport, extractThumbnails };
 
 

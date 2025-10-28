@@ -29,8 +29,8 @@ function cleanupTempDir() {
 
 function createWindow () {
   const win = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1400,
+    height: 900,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -106,6 +106,25 @@ ipcMain.handle('import-file', async (event, originalPath) => {
     
     return { success: true, tempPath: tempFilePath, originalPath };
   } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Extract thumbnails from video
+ipcMain.handle('extract-thumbnails', async (event, videoPath, duration) => {
+  try {
+    const tempDirPath = getTempDir();
+    const thumbDir = path.join(tempDirPath, 'thumbnails_' + Date.now());
+    
+    // Calculate number of thumbnails based on duration (aim for ~50px per thumb)
+    const count = Math.max(5, Math.min(20, Math.floor(duration / 2)));
+    
+    const { extractThumbnails } = require('./ffmpeg/wrapper');
+    const thumbnails = await extractThumbnails(videoPath, thumbDir, count, duration);
+    
+    return { success: true, thumbnails };
+  } catch (err) {
+    console.error('Thumbnail extraction error:', err);
     return { success: false, error: err.message };
   }
 });

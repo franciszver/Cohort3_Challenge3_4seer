@@ -6,34 +6,557 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>4Seer MVP Video Editor</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-      #dropzone {
-        border: 2px dashed #999; border-radius: 6px; padding: 40px; text-align: center; margin: 20px;
-        background: #f9f9f9;
+      * { box-sizing: border-box; }
+      
+      body { 
+        font-family: Arial, sans-serif; 
+        margin: 0; 
+        padding: 0; 
+        background: #1a1a1a;
+        color: #e0e0e0;
+        overflow: hidden;
       }
-      #timeline { height: 120px; border-top: 1px solid #ddd; display:flex; align-items:center; padding: 10px; overflow:auto; }
-      .clip { height: 60px; padding: 8px; background: #ddd; border-radius: 6px; margin-right: 8px; display:inline-block; min-width: 120px; text-align:center; }
-      #video { width: 100%; height: 360px; background: #000; display: block; }
+
+      /* Main 4-panel grid layout */
+      #app-container {
+        display: grid;
+        grid-template-columns: 300px 1fr;
+        grid-template-rows: 1fr 300px;
+        height: 100vh;
+        gap: 2px;
+        background: #0a0a0a;
+      }
+
+      /* Panel styling */
+      .panel {
+        background: #2a2a2a;
+        border: 1px solid #3a3a3a;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .panel-header {
+        background: #1f1f1f;
+        padding: 8px 12px;
+        border-bottom: 1px solid #3a3a3a;
+        font-weight: bold;
+        font-size: 13px;
+        color: #b0b0b0;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .panel-content {
+        flex: 1;
+        overflow: auto;
+        padding: 8px;
+      }
+
+      /* Top-left: Project Files panel */
+      #project-files-panel {
+        grid-column: 1;
+        grid-row: 1;
+      }
+
+      #project-files-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      #dropzone {
+        border: 2px dashed #555;
+        border-radius: 6px;
+        padding: 30px 20px;
+        text-align: center;
+        background: #333;
+        color: #999;
+        cursor: pointer;
+        margin-bottom: 12px;
+        transition: all 0.2s;
+      }
+
+      #dropzone:hover {
+        border-color: #777;
+        background: #3a3a3a;
+        color: #bbb;
+      }
+
+      #dropzone.drag-over {
+        border-color: #4a9eff;
+        background: #2a3a4a;
+        color: #4a9eff;
+      }
+
+      .library-clip {
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        border-radius: 4px;
+        padding: 10px;
+        cursor: grab;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .library-clip:hover {
+        background: #454545;
+        border-color: #5a5a5a;
+      }
+
+      .library-clip.dragging {
+        opacity: 0.5;
+        cursor: grabbing;
+      }
+
+      .library-clip-icon {
+        width: 40px;
+        height: 30px;
+        background: #555;
+        border-radius: 3px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        flex-shrink: 0;
+      }
+
+      .library-clip-name {
+        flex: 1;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* Top-right: Video Preview panel */
+      #preview-panel {
+        grid-column: 2;
+        grid-row: 1;
+      }
+
+      #video-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        background: #000;
+      }
+
+      #video {
+        flex: 1;
+        width: 100%;
+        background: #000;
+        object-fit: contain;
+      }
+
+      #transport-controls {
+        background: #1a1a1a;
+        padding: 10px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid #3a3a3a;
+      }
+
+      .transport-btn {
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        color: #e0e0e0;
+        padding: 8px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: all 0.2s;
+      }
+
+      .transport-btn:hover {
+        background: #4a4a4a;
+        border-color: #5a5a5a;
+      }
+
+      .transport-btn:active {
+        background: #2a2a2a;
+      }
+
+      /* Bottom-left: Properties panel */
+      #properties-panel {
+        grid-column: 1;
+        grid-row: 2;
+      }
+
+      .property-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .property-label {
+        font-size: 12px;
+        color: #b0b0b0;
+        min-width: 80px;
+      }
+
+      .property-input {
+        flex: 1;
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        color: #e0e0e0;
+        padding: 6px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+
+      .property-input:focus {
+        outline: none;
+        border-color: #4a9eff;
+      }
+
+      .property-btn {
+        background: #4a9eff;
+        border: none;
+        color: #fff;
+        padding: 6px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: all 0.2s;
+      }
+
+      .property-btn:hover {
+        background: #3a8eef;
+      }
+
+      #export-section {
+        margin-top: 20px;
+        padding-top: 20px;
+        border-top: 1px solid #3a3a3a;
+      }
+
+      #exportBtn {
+        width: 100%;
+        background: #4caf50;
+        border: none;
+        color: #fff;
+        padding: 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: bold;
+        transition: all 0.2s;
+      }
+
+      #exportBtn:hover {
+        background: #45a049;
+      }
+
+      #exportStatus {
+        font-size: 11px;
+        margin-top: 8px;
+        color: #999;
+      }
+
+      #exportProgressBar {
+        width: 0%;
+        height: 4px;
+        background: #4caf50;
+        border-radius: 2px;
+        margin-top: 8px;
+        transition: width 0.3s;
+      }
+
+      /* Bottom-right: Timeline panel */
+      #timeline-panel {
+        grid-column: 2;
+        grid-row: 2;
+      }
+
+      #timeline-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        background: #1a1a1a;
+      }
+
+      #timeline-toolbar {
+        background: #1f1f1f;
+        padding: 6px 10px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        border-bottom: 1px solid #3a3a3a;
+      }
+
+      #timeline-toolbar label {
+        font-size: 11px;
+        color: #999;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .zoom-btn {
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        color: #e0e0e0;
+        padding: 4px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+
+      .zoom-btn:hover {
+        background: #4a4a4a;
+      }
+
+      #timeline-ruler {
+        background: #252525;
+        height: 25px;
+        border-bottom: 1px solid #3a3a3a;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .ruler-marker {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        border-left: 1px solid #4a4a4a;
+        font-size: 10px;
+        color: #888;
+        padding-left: 4px;
+        padding-top: 2px;
+      }
+
+      #timeline-tracks {
+        flex: 1;
+        overflow: auto;
+        position: relative;
+      }
+
+      .timeline-track {
+        height: 80px;
+        border-bottom: 1px solid #3a3a3a;
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+
+      .track-label {
+        position: sticky;
+        left: 0;
+        width: 80px;
+        height: 100%;
+        background: #1f1f1f;
+        border-right: 1px solid #3a3a3a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        color: #888;
+        z-index: 10;
+      }
+
+      .track-content {
+        flex: 1;
+        height: 100%;
+        position: relative;
+      }
+
+      .timeline-clip {
+        position: absolute;
+        height: 60px;
+        top: 10px;
+        background: #4a7ba7;
+        border: 1px solid #5a8bc7;
+        border-radius: 4px;
+        cursor: move;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        transition: box-shadow 0.2s;
+      }
+
+      .timeline-clip:hover {
+        box-shadow: 0 0 8px rgba(74, 123, 167, 0.6);
+      }
+
+      .timeline-clip.selected {
+        border-color: #4a9eff;
+        box-shadow: 0 0 12px rgba(74, 158, 255, 0.8);
+      }
+
+      .timeline-clip-thumbnails {
+        display: flex;
+        height: 100%;
+        width: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+
+      .timeline-clip-thumbnail {
+        height: 100%;
+        object-fit: cover;
+        opacity: 0.7;
+      }
+
+      .timeline-clip-label {
+        position: relative;
+        z-index: 1;
+        padding: 0 8px;
+        font-size: 11px;
+        color: #fff;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        width: 100%;
+      }
+
+      .timeline-clip-resize-handle {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 10px;
+        cursor: ew-resize;
+        z-index: 2;
+      }
+
+      .timeline-clip-resize-handle.left {
+        left: 0;
+      }
+
+      .timeline-clip-resize-handle.right {
+        right: 0;
+      }
+
+      #playhead {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: #ff4444;
+        pointer-events: none;
+        z-index: 100;
+        box-shadow: 0 0 4px rgba(255, 68, 68, 0.8);
+      }
+
+      #playhead::before {
+        content: '';
+        position: absolute;
+        top: -6px;
+        left: -6px;
+        width: 14px;
+        height: 14px;
+        background: #ff4444;
+        border-radius: 50%;
+        box-shadow: 0 0 4px rgba(255, 68, 68, 0.8);
+      }
+
+      /* Scrollbar styling for dark theme */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: #1a1a1a;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: #4a4a4a;
+        border-radius: 5px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: #5a5a5a;
+      }
     </style>
   </head>
   <body>
-    <div id="dropzone">Drag MP4/MOV files here or click to select</div>
-    <video id="video" controls></video>
-    <div id="timeline"></div>
-    <div id="trimPanel" style="padding:8px; display:flex; gap:8px; align-items:center;">
-      <label>In (s): <input id="inPointInput" type="number" min="0" step="0.1" value="0" /></label>
-      <label>Out (s): <input id="outPointInput" type="number" min="0" step="0.1" value="0" /></label>
-      <button id="applyTrimBtn">Apply Trim</button>
+    <div id="app-container">
+      <!-- Top-left: Project Files -->
+      <div id="project-files-panel" class="panel">
+        <div class="panel-header">Project Files</div>
+        <div class="panel-content">
+          <div id="dropzone">
+            Drag MP4/MOV files here<br>or click to select
+          </div>
+          <div id="project-files-list"></div>
+        </div>
+      </div>
+
+      <!-- Top-right: Video Preview -->
+      <div id="preview-panel" class="panel">
+        <div class="panel-header">Video Preview</div>
+        <div class="panel-content" style="padding: 0;">
+          <div id="video-container">
+            <video id="video"></video>
+            <div id="transport-controls">
+              <button class="transport-btn" id="rewindBtn">⏮</button>
+              <button class="transport-btn" id="playPauseBtn">▶</button>
+              <button class="transport-btn" id="forwardBtn">⏭</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom-left: Properties -->
+      <div id="properties-panel" class="panel">
+        <div class="panel-header">Properties</div>
+        <div class="panel-content">
+          <div id="clip-properties">
+            <div class="property-row">
+              <span class="property-label">In Point (s):</span>
+              <input id="inPointInput" class="property-input" type="number" min="0" step="0.1" value="0" />
+            </div>
+            <div class="property-row">
+              <span class="property-label">Out Point (s):</span>
+              <input id="outPointInput" class="property-input" type="number" min="0" step="0.1" value="0" />
+            </div>
+            <div class="property-row">
+              <button id="applyTrimBtn" class="property-btn">Apply Trim</button>
+            </div>
+          </div>
+          
+          <div id="export-section">
+            <button id="exportBtn">Export Video</button>
+            <div id="exportStatus">Ready</div>
+            <div id="exportProgressBar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom-right: Timeline -->
+      <div id="timeline-panel" class="panel">
+        <div class="panel-header">Timeline</div>
+        <div class="panel-content" style="padding: 0;">
+          <div id="timeline-container">
+            <div id="timeline-toolbar">
+              <label>
+                Zoom:
+                <button class="zoom-btn" id="zoomOutBtn">−</button>
+                <button class="zoom-btn" id="zoomInBtn">+</button>
+              </label>
+            </div>
+            <div id="timeline-ruler"></div>
+            <div id="timeline-tracks">
+              <div class="timeline-track" id="track-1">
+                <div class="track-label">Track 1</div>
+                <div class="track-content" id="track-1-content">
+                  <div id="playhead"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
-    <div id="exportStatus" style="padding:8px; color:#333;">Idle</div>
-    <div style="padding:8px; height:6px; background:#eee; border-radius:3px; overflow:hidden;">
-      <div id="exportProgressBar" style="width:0%; height:100%; background:#4caf50;"></div>
-    </div>
-    <div style="padding:8px;">
-      <button id="exportBtn">Export</button>
-    </div>
+
     <script src="renderer.js"></script>
   </body>
-  </html>
-
-
+</html>
