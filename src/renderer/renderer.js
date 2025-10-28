@@ -7,6 +7,7 @@ let importedClips = []; // Clips in the media library
 let timelineClips = []; // Clips on the timeline
 let selectedClipIndex = null;
 let timelineZoom = 50; // pixels per second
+let timelineCurrentTime = 0; // Global timeline position (seconds)
 
 // DOM refs
 const dropzone = document.getElementById('dropzone');
@@ -367,27 +368,63 @@ playPauseBtn.addEventListener('click', () => {
 });
 
 rewindBtn.addEventListener('click', () => {
-  videoEl.currentTime = Math.max(0, videoEl.currentTime - 5);
+  const newTime = Math.max(0, timelineCurrentTime - 5);
+  seekToTimelinePosition(newTime);
 });
 
 forwardBtn.addEventListener('click', () => {
-  videoEl.currentTime = Math.min(videoEl.duration, videoEl.currentTime + 5);
+  // Calculate total timeline duration
+  let totalDuration = 0;
+  timelineClips.forEach(clip => {
+    const clipEnd = (clip.startTime || 0) + (clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration);
+    totalDuration = Math.max(totalDuration, clipEnd);
+  });
+  
+  const newTime = Math.min(totalDuration, timelineCurrentTime + 5);
+  seekToTimelinePosition(newTime);
 });
 
 // Update playhead position
 videoEl.addEventListener('timeupdate', () => {
   if (!videoEl.duration) return;
-  const currentTime = videoEl.currentTime;
-  playhead.style.left = (currentTime * timelineZoom) + 'px';
+  
+  // Calculate global timeline position
+  const clip = selectedClipIndex != null ? timelineClips[selectedClipIndex] : null;
+  if (clip) {
+    const clipLocalTime = videoEl.currentTime - (clip.inPoint || 0);
+    timelineCurrentTime = (clip.startTime || 0) + clipLocalTime;
+  } else {
+    timelineCurrentTime = videoEl.currentTime;
+  }
+  
+  // Update playhead position based on global timeline time
+  playhead.style.left = (timelineCurrentTime * timelineZoom) + 'px';
+  
+  // Auto-scroll timeline to keep playhead in view
+  const playheadPixelPos = timelineCurrentTime * timelineZoom;
+  const containerWidth = trackContent.clientWidth;
+  const scrollLeft = trackContent.scrollLeft;
+  const visibleLeft = scrollLeft;
+  const visibleRight = scrollLeft + containerWidth;
+  
+  // Scale edge threshold based on zoom level (roughly 2 seconds of time at default zoom)
+  const edgeThreshold = 2 * timelineZoom;
+  
+  // If playhead is outside visible area, scroll to center it
+  const targetPos = playheadPixelPos - (containerWidth / 2);
+  if (playheadPixelPos < visibleLeft + edgeThreshold) {
+    // Playhead approaching left edge, scroll left
+    trackContent.scrollLeft = Math.max(0, targetPos);
+  } else if (playheadPixelPos > visibleRight - edgeThreshold) {
+    // Playhead approaching right edge, scroll right
+    trackContent.scrollLeft = Math.max(0, targetPos);
+  }
   
   // Check if we've reached the outPoint of current clip
-  if (selectedClipIndex != null && timelineClips[selectedClipIndex]) {
-    const clip = timelineClips[selectedClipIndex];
-    if (clip.outPoint > 0 && currentTime >= clip.outPoint) {
-      videoEl.pause();
-      // Trigger ended event to move to next clip
-      videoEl.dispatchEvent(new Event('ended'));
-    }
+  if (clip && clip.outPoint > 0 && videoEl.currentTime >= clip.outPoint) {
+    videoEl.pause();
+    // Trigger ended event to move to next clip
+    videoEl.dispatchEvent(new Event('ended'));
   }
 });
 
@@ -409,13 +446,47 @@ videoEl.addEventListener('ended', () => {
 trackContent.addEventListener('click', (e) => {
   if (e.target.classList.contains('timeline-clip') || 
       e.target.classList.contains('timeline-clip-label') ||
-      e.target.classList.contains('timeline-clip-resize-handle')) {
+      e.target.classList.contains('timeline-clip-resize-handle') ||
+      e.target.id === 'playhead') {
     return;
   }
+  
+  seekToTimelinePosition(e);
+});
+
+// Playhead dragging
+let isPlayheadDragging = false;
+playhead.addEventListener('mousedown', (e) => {
+  isPlayheadDragging = true;
+  document.body.style.cursor = 'pointer';
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!isPlayheadDragging) return;
   
   const rect = trackContent.getBoundingClientRect();
   const x = e.clientX - rect.left + trackContent.scrollLeft;
   const time = x / timelineZoom;
+  
+  seekToTimelinePosition(time);
+});
+
+document.addEventListener('mouseup', () => {
+  isPlayheadDragging = false;
+  document.body.style.cursor = '';
+});
+
+// Helper function to seek to a timeline position
+function seekToTimelinePosition(eventOrTime) {
+  let time;
+  
+  if (typeof eventOrTime === 'number') {
+    time = eventOrTime;
+  } else {
+    const rect = trackContent.getBoundingClientRect();
+    const x = eventOrTime.clientX - rect.left + trackContent.scrollLeft;
+    time = x / timelineZoom;
+  }
   
   // Find which clip this time falls into
   for (let i = 0; i < timelineClips.length; i++) {
@@ -425,12 +496,18 @@ trackContent.addEventListener('click', (e) => {
     const clipEnd = clipStart + clipDuration;
     
     if (time >= clipStart && time < clipEnd) {
-      selectTimelineClip(i);
-      videoEl.currentTime = clip.inPoint + (time - clipStart);
-      break;
+      // Select the clip if it's not already selected
+      if (selectedClipIndex !== i) {
+        selectTimelineClip(i);
+      }
+      // Seek to the position within this clip
+      const clipLocalTime = clip.inPoint + (time - clipStart);
+      videoEl.currentTime = clipLocalTime;
+      timelineCurrentTime = time;
+      return;
     }
   }
-});
+}
 
 // Zoom controls
 zoomInBtn.addEventListener('click', () => {
