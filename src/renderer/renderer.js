@@ -188,6 +188,11 @@ function selectTimelineClip(idx) {
   // Load video preview
   videoEl.src = clip.path;
   videoEl.load();
+  
+  // Set to start at inPoint
+  videoEl.addEventListener('loadedmetadata', () => {
+    videoEl.currentTime = clip.inPoint || 0;
+  }, { once: true });
 }
 
 // Render timeline ruler
@@ -285,6 +290,11 @@ async function addClipToTimeline(clipId) {
   timelineClips.push(timelineClip);
   renderTimeline();
   
+  // Auto-select first clip added to timeline
+  if (selectedClipIndex == null) {
+    selectTimelineClip(0);
+  }
+  
   // Extract thumbnails in background
   extractThumbnailsForClip(timelineClip);
 }
@@ -369,6 +379,30 @@ videoEl.addEventListener('timeupdate', () => {
   if (!videoEl.duration) return;
   const currentTime = videoEl.currentTime;
   playhead.style.left = (currentTime * timelineZoom) + 'px';
+  
+  // Check if we've reached the outPoint of current clip
+  if (selectedClipIndex != null && timelineClips[selectedClipIndex]) {
+    const clip = timelineClips[selectedClipIndex];
+    if (clip.outPoint > 0 && currentTime >= clip.outPoint) {
+      videoEl.pause();
+      // Trigger ended event to move to next clip
+      videoEl.dispatchEvent(new Event('ended'));
+    }
+  }
+});
+
+// Auto-play next clip when current one ends
+videoEl.addEventListener('ended', () => {
+  if (selectedClipIndex == null) return;
+  
+  // Move to next clip if available
+  if (selectedClipIndex < timelineClips.length - 1) {
+    selectTimelineClip(selectedClipIndex + 1);
+    videoEl.play();
+  } else {
+    // Stop at end of last clip
+    playPauseBtn.textContent = '▶';
+  }
 });
 
 // Timeline click to seek
