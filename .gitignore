@@ -1,33 +1,83 @@
-# Dependencies
+# ============================================================================
+# 4Seer MVP Video Editor - .gitignore
+# Ignores files and directories that should not be committed to version control
+# ============================================================================
+
+# ============================================================================
+# DEPENDENCIES & PACKAGE MANAGERS
+# ============================================================================
 node_modules/
-resources/ffmpeg/
+package-lock.json.old
+npm-debug.log*
+npm-error.log*
+yarn-debug.log*
+yarn-error.log*
+yarn.lock
+pnpm-lock.yaml
 
-
-# Electron build output
+# ============================================================================
+# BUILD & DIST ARTIFACTS
+# ============================================================================
 dist/
 build/
 out/
+*.exe
+*.dmg
+*.zip
+*.blockmap
 
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# ============================================================================
+# ELECTRON BUILD ARTIFACTS
+# ============================================================================
+# Electron builder output
+build/
+dist/
+win-unpacked/
+release/
+app-update.yml
+builder-debug.yml
+builder-effective-config.yaml
+latest.yml
 
-# Runtime data
-pids
+# ============================================================================
+# FFmpeg BUNDLING (DO NOT IGNORE resources/ffmpeg IN PRODUCTION)
+# ============================================================================
+# NOTE: resources/ffmpeg/ MUST be committed for installer to work!
+# Only ignore if you have a separate FFmpeg build pipeline
+# resources/ffmpeg/
+
+# ============================================================================
+# RUNTIME DATA & TEMPORARY FILES
+# ============================================================================
+pids/
 *.pid
 *.seed
 *.pid.lock
+tmp/
+temp/
+.tmp/
+*.tmp
 
-# Environment variables
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+.env.*.local
 
-# OS generated files
+# ============================================================================
+# IDE & EDITOR FILES
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
 .DS_Store
 .DS_Store?
 ._*
@@ -36,30 +86,119 @@ pids
 ehthumbs.db
 Thumbs.db
 
-# IDE files
-.vscode/
-.idea/
+# ============================================================================
+# OS GENERATED FILES
+# ============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.AppleDouble
+.LSOverride
+
+# ============================================================================
+# TESTING FILES & TEST ARTIFACTS
+# ============================================================================
+# Unit tests (if implemented)
+__tests__/
+test/
+*.test.js
+*.spec.js
+coverage/
+.nyc_output/
+.coverage/
+*.lcov
+
+# Test video files (for testing import/export workflows)
+# Keep these locally during development but don't commit them
+test-videos/
+test-clips/
+sample-videos/
+*.test.mp4
+*.test.mov
+
+# ============================================================================
+# DOCUMENTATION DRAFTS
+# ============================================================================
+# Keep only finalized docs in repo
+_docs/drafts/
+_docs/*.draft.md
+_docs/*.tmp.md
+_docs/*~
+docs-backup/
+NOTES.md
+TODO.md
+WIP.md
+SCRATCH.md
+
+# ============================================================================
+# LOGS & DEBUG FILES
+# ============================================================================
+*.log
+logs/
+debug.log
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ============================================================================
+# COVERAGE REPORTS
+# ============================================================================
+coverage/
+.nyc_output/
+.coverage/
+
+# ============================================================================
+# MISC DEVELOPMENT ARTIFACTS
+# ============================================================================
+.cache/
+*.bak
+*.backup
 *.swp
 *.swo
 *~
+*.orig
+*.rej
 
-# Temporary files
-tmp/
-temp/
-.tmp/
+# Temporary development files
+.vuepress/dist/
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
 
-# Electron builder artifacts
-*.blockmap
-builder-debug.yml
-builder-effective-config.yaml
-latest.yml
-
+# ============================================================================
+# ELECTRON SPECIFIC
+# ============================================================================
 # App update files
 app-update.yml
 
-# Coverage reports
-coverage/
-.nyc_output
+# Asar archives (if used)
+*.asar
 
-# Optional: Uncomment if FFmpeg binaries are large
+# ============================================================================
+# VIDEO EDITOR SPECIFIC
+# ============================================================================
+# Temporary directories created at runtime
+temp-segments/
+temp-thumbnails/
+temp-imports/
+video-cache/
+
+# Project files (if implementing save feature later)
+*.4seer
+*.project
+*.backup.4seer
+
+# ============================================================================
+# OPTIONAL: Uncomment for large binary exclusions
+# ============================================================================
+# If FFmpeg binaries are large and you have external build pipeline:
 # resources/ffmpeg/
+# resources/ffmpeg/**
+
+# If you want to exclude all video files (useful for testing):
+# *.mp4
+# *.mov
+# *.avi
+# *.mkv
+# *.flv
+# *.webm
