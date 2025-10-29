@@ -488,6 +488,206 @@
       ::-webkit-scrollbar-thumb:hover {
         background: #5a5a5a;
       }
+
+      /* Recording Modal */
+      #recording-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.8);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+      }
+
+      #recording-modal.show {
+        display: flex;
+      }
+
+      .modal-content {
+        background: #2a2a2a;
+        border: 1px solid #3a3a3a;
+        border-radius: 8px;
+        padding: 20px;
+        width: 400px;
+        max-width: 90vw;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      }
+
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #3a3a3a;
+      }
+
+      .modal-title {
+        font-size: 16px;
+        font-weight: bold;
+        color: #e0e0e0;
+      }
+
+      .modal-close {
+        background: none;
+        border: none;
+        color: #999;
+        font-size: 18px;
+        cursor: pointer;
+        padding: 0;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .modal-close:hover {
+        color: #e0e0e0;
+      }
+
+      .source-row {
+        display: flex;
+        align-items: center;
+        margin-bottom: 15px;
+        gap: 10px;
+      }
+
+      .source-label {
+        font-size: 12px;
+        color: #b0b0b0;
+        min-width: 100px;
+      }
+
+      .source-select {
+        flex: 1;
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        color: #e0e0e0;
+        padding: 6px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+
+      .source-select:focus {
+        outline: none;
+        border-color: #4a9eff;
+      }
+
+      .source-toggle {
+        background: #555;
+        border: 1px solid #666;
+        color: #e0e0e0;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 10px;
+        cursor: pointer;
+      }
+
+      .source-toggle.active {
+        background: #4a9eff;
+        border-color: #4a9eff;
+      }
+
+      .audio-meter-container {
+        margin: 15px 0;
+      }
+
+      .audio-meter-label {
+        font-size: 12px;
+        color: #b0b0b0;
+        margin-bottom: 5px;
+      }
+
+      .audio-meter {
+        width: 100%;
+        height: 20px;
+        background: #1a1a1a;
+        border: 1px solid #3a3a3a;
+        border-radius: 3px;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .audio-meter-bar {
+        height: 100%;
+        background: linear-gradient(to right, #4caf50, #ffeb3b, #f44336);
+        width: 0%;
+        transition: width 0.1s ease;
+      }
+
+      .recording-controls {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin: 20px 0;
+      }
+
+      .recording-btn {
+        background: #f44336;
+        border: none;
+        color: #fff;
+        padding: 10px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: bold;
+        transition: all 0.2s;
+      }
+
+      .recording-btn:hover {
+        background: #d32f2f;
+      }
+
+      .recording-btn:disabled {
+        background: #666;
+        cursor: not-allowed;
+      }
+
+      .recording-btn.stop {
+        background: #4caf50;
+      }
+
+      .recording-btn.stop:hover {
+        background: #45a049;
+      }
+
+      .recording-timer {
+        text-align: center;
+        font-size: 18px;
+        font-weight: bold;
+        color: #f44336;
+        margin: 15px 0;
+        font-family: monospace;
+      }
+
+      .recording-indicator {
+        display: none;
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: #f44336;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 11px;
+        font-weight: bold;
+        animation: pulse 1s infinite;
+      }
+
+      .recording-indicator.active {
+        display: block;
+      }
+
+      @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+      }
     </style>
   </head>
   <body>
@@ -513,6 +713,7 @@
               <button class="transport-btn" id="rewindBtn">⏮</button>
               <button class="transport-btn" id="playPauseBtn">▶</button>
               <button class="transport-btn" id="forwardBtn">⏭</button>
+              <button class="transport-btn" id="recordBtn">🔴</button>
             </div>
           </div>
         </div>
@@ -569,6 +770,55 @@
         </div>
       </div>
     </div>
+
+    <!-- Recording Modal -->
+    <div id="recording-modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="modal-title">Record Video</div>
+          <button class="modal-close" id="closeRecordingModal">×</button>
+        </div>
+        
+        <div class="source-row">
+          <div class="source-label">Screen/Window:</div>
+          <select class="source-select" id="desktopSourceSelect">
+            <option value="">Select source...</option>
+          </select>
+        </div>
+        
+        <div class="source-row">
+          <div class="source-label">Webcam:</div>
+          <select class="source-select" id="webcamSourceSelect">
+            <option value="">Select webcam...</option>
+          </select>
+          <button class="source-toggle" id="webcamToggle">None</button>
+        </div>
+        
+        <div class="source-row">
+          <div class="source-label">Microphone:</div>
+          <select class="source-select" id="microphoneSourceSelect">
+            <option value="">Select microphone...</option>
+          </select>
+        </div>
+        
+        <div class="audio-meter-container">
+          <div class="audio-meter-label">Audio Level:</div>
+          <div class="audio-meter">
+            <div class="audio-meter-bar" id="audioMeterBar"></div>
+          </div>
+        </div>
+        
+        <div class="recording-controls">
+          <button class="recording-btn" id="startRecordingBtn">● Start Recording</button>
+          <button class="recording-btn stop" id="stopRecordingBtn" disabled>■ Stop Recording</button>
+        </div>
+        
+        <div class="recording-timer" id="recordingTimer" style="display: none;">00:00:00</div>
+      </div>
+    </div>
+
+    <!-- Recording Indicator -->
+    <div class="recording-indicator" id="recordingIndicator">REC</div>
 
     <script src="renderer.js"></script>
   </body>

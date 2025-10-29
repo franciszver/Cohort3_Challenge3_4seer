@@ -9,6 +9,22 @@ let selectedClipIndex = null;
 let timelineZoom = 50; // pixels per second
 let timelineCurrentTime = 0; // Global timeline position (seconds)
 
+// Recording state management
+let recordingState = {
+  isRecording: false,
+  mediaRecorder: null,
+  recordedChunks: [],
+  startTime: null,
+  liveClipId: null,
+  streams: { desktop: null, webcam: null, audio: null },
+  canvas: null,
+  canvasStream: null,
+  audioContext: null,
+  analyser: null,
+  timerInterval: null,
+  updateInterval: null
+};
+
 // DOM refs
 const dropzone = document.getElementById('dropzone');
 const projectFilesList = document.getElementById('project-files-list');
@@ -27,6 +43,9 @@ const playhead = document.getElementById('playhead');
 const timelineRuler = document.getElementById('timeline-ruler');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
+
+// Recording DOM refs - will be initialized after DOM loads
+let recordBtn, recordingModal, closeRecordingModal, desktopSourceSelect, webcamSourceSelect, microphoneSourceSelect, webcamToggle, audioMeterBar, startRecordingBtn, stopRecordingBtn, recordingTimer, recordingIndicator;
 
 // File input for click-to-select
 const fileInput = document.createElement('input');
@@ -793,7 +812,588 @@ function finishDrag() {
   renderTimeline();
 }
 
-// Init
+// ===== RECORDING FUNCTIONS =====
+
+// Open recording modal and populate source lists
+async function openRecordingModal() {
+  console.log('openRecordingModal called');
+  
+  if (!recordingModal) {
+    console.error('Recording modal not found!');
+    return;
+  }
+  
+  console.log('Showing recording modal');
+  recordingModal.classList.add('show');
+  
+  try {
+    // Get desktop sources
+    const desktopResult = await ipcRenderer.invoke('get-desktop-sources');
+    if (desktopResult.success) {
+      desktopSourceSelect.innerHTML = '<option value="">Select source...</option>';
+      desktopResult.sources.forEach(source => {
+        const option = document.createElement('option');
+        option.value = source.id;
+        option.textContent = `${source.type === 'screen' ? 'Screen' : 'Window'}: ${source.name}`;
+        desktopSourceSelect.appendChild(option);
+      });
+    }
+    
+    // Get webcam sources
+    const webcamDevices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = webcamDevices.filter(device => device.kind === 'videoinput');
+    webcamSourceSelect.innerHTML = '<option value="">Select webcam...</option>';
+    videoDevices.forEach(device => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || `Camera ${device.deviceId.substring(0, 8)}`;
+      webcamSourceSelect.appendChild(option);
+    });
+    
+    // Get microphone sources
+    const audioDevices = webcamDevices.filter(device => device.kind === 'audioinput');
+    microphoneSourceSelect.innerHTML = '<option value="">Select microphone...</option>';
+    audioDevices.forEach(device => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || `Microphone ${device.deviceId.substring(0, 8)}`;
+      microphoneSourceSelect.appendChild(option);
+    });
+    
+  } catch (err) {
+    console.error('Error populating sources:', err);
+  }
+}
+
+// Close recording modal
+function closeRecordingModalFunction() {
+  recordingModal.classList.remove('show');
+  // Reset form
+  desktopSourceSelect.value = '';
+  webcamSourceSelect.value = '';
+  microphoneSourceSelect.value = '';
+  webcamToggle.textContent = 'None';
+  webcamToggle.classList.remove('active');
+  audioMeterBar.style.width = '0%';
+  recordingTimer.style.display = 'none';
+  startRecordingBtn.disabled = false;
+  stopRecordingBtn.disabled = true;
+}
+
+// Get desktop sources via IPC
+async function getDesktopSources() {
+  try {
+    const result = await ipcRenderer.invoke('get-desktop-sources');
+    return result.success ? result.sources : [];
+  } catch (err) {
+    console.error('Error getting desktop sources:', err);
+    return [];
+  }
+}
+
+// Initialize media streams
+async function initializeStreams() {
+  const desktopSourceId = desktopSourceSelect.value;
+  const webcamSourceId = webcamSourceSelect.value;
+  const microphoneSourceId = microphoneSourceSelect.value;
+  
+  try {
+    // Desktop/Window stream
+    if (desktopSourceId) {
+      recordingState.streams.desktop = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: desktopSourceId
+          }
+        }
+      });
+    }
+    
+    // Webcam stream
+    console.log('Webcam source ID:', webcamSourceId);
+    console.log('Webcam toggle active:', webcamToggle ? webcamToggle.classList.contains('active') : 'toggle not found');
+    
+    if (webcamSourceId && webcamToggle && webcamToggle.classList.contains('active')) {
+      console.log('Initializing webcam stream with device:', webcamSourceId);
+      recordingState.streams.webcam = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          deviceId: { exact: webcamSourceId }
+        }
+      });
+      console.log('Webcam stream created:', recordingState.streams.webcam);
+    } else {
+      console.log('Webcam not enabled or no source selected. SourceId:', webcamSourceId, 'Toggle active:', webcamToggle ? webcamToggle.classList.contains('active') : 'toggle not found');
+    }
+    
+    // Audio stream
+    if (microphoneSourceId) {
+      recordingState.streams.audio = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: { exact: microphoneSourceId }
+        },
+        video: false
+      });
+      
+      // Setup audio level meter
+      setupAudioMeter(recordingState.streams.audio);
+    }
+    
+    return true;
+  } catch (err) {
+    console.error('Error initializing streams:', err);
+    return false;
+  }
+}
+
+// Setup audio level meter
+function setupAudioMeter(audioStream) {
+  recordingState.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  recordingState.analyser = recordingState.audioContext.createAnalyser();
+  const source = recordingState.audioContext.createMediaStreamSource(audioStream);
+  
+  source.connect(recordingState.analyser);
+  recordingState.analyser.fftSize = 256;
+  
+  updateAudioMeter();
+}
+
+// Update audio level meter
+function updateAudioMeter() {
+  if (!recordingState.analyser) return;
+  
+  const dataArray = new Uint8Array(recordingState.analyser.frequencyBinCount);
+  recordingState.analyser.getByteFrequencyData(dataArray);
+  
+  // Calculate average volume
+  const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
+  const percentage = Math.min(100, (average / 255) * 100);
+  
+  audioMeterBar.style.width = percentage + '%';
+  
+  if (recordingState.isRecording) {
+    requestAnimationFrame(updateAudioMeter);
+  }
+}
+
+// Composite streams using canvas
+function compositeStreams() {
+  console.log('Starting canvas compositing...');
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  // Set canvas size to match desktop stream
+  const desktopVideo = document.createElement('video');
+  desktopVideo.srcObject = recordingState.streams.desktop;
+  desktopVideo.play();
+  
+  console.log('Desktop stream:', recordingState.streams.desktop);
+  console.log('Webcam stream:', recordingState.streams.webcam);
+  
+  desktopVideo.addEventListener('loadedmetadata', () => {
+    console.log('Desktop video loaded:', desktopVideo.videoWidth, 'x', desktopVideo.videoHeight);
+    canvas.width = desktopVideo.videoWidth;
+    canvas.height = desktopVideo.videoHeight;
+    
+    // Create webcam video element if webcam is enabled
+    let webcamVideo = null;
+    if (recordingState.streams.webcam) {
+      console.log('Creating webcam video element');
+      webcamVideo = document.createElement('video');
+      webcamVideo.srcObject = recordingState.streams.webcam;
+      webcamVideo.play();
+      
+      webcamVideo.addEventListener('loadedmetadata', () => {
+        console.log('Webcam video loaded:', webcamVideo.videoWidth, 'x', webcamVideo.videoHeight);
+      });
+    }
+    
+    // Animation loop for compositing
+    function drawFrame() {
+      if (!recordingState.isRecording) return;
+      
+      // Draw desktop stream
+      ctx.drawImage(desktopVideo, 0, 0, canvas.width, canvas.height);
+      
+      // Draw webcam overlay if enabled
+      if (webcamVideo && webcamVideo.readyState >= 2) {
+        const webcamWidth = canvas.width * 0.25; // 25% width
+        const webcamHeight = (webcamVideo.videoHeight / webcamVideo.videoWidth) * webcamWidth;
+        const x = canvas.width - webcamWidth - 10; // 10px padding
+        const y = canvas.height - webcamHeight - 10; // 10px padding
+        
+        console.log('Drawing webcam overlay at:', x, y, webcamWidth, webcamHeight);
+        ctx.drawImage(webcamVideo, x, y, webcamWidth, webcamHeight);
+      }
+      
+      requestAnimationFrame(drawFrame);
+    }
+    
+    drawFrame();
+  });
+  
+  recordingState.canvas = canvas;
+  recordingState.canvasStream = canvas.captureStream(30); // 30 FPS
+  
+  console.log('Canvas stream created:', recordingState.canvasStream);
+  return recordingState.canvasStream;
+}
+
+// Add live clip to timeline during recording
+function addLiveClipToTimeline() {
+  const liveClipId = 'live_recording_' + Date.now();
+  recordingState.liveClipId = liveClipId;
+  
+  // Calculate start time (after last clip)
+  let startTime = 0;
+  if (timelineClips.length > 0) {
+    const lastClip = timelineClips[timelineClips.length - 1];
+    const lastDuration = lastClip.outPoint > 0 ? (lastClip.outPoint - lastClip.inPoint) : lastClip.duration;
+    startTime = (lastClip.startTime || 0) + lastDuration;
+  }
+  
+  const liveClip = {
+    id: liveClipId,
+    sourceId: null,
+    path: null,
+    originalPath: null,
+    name: 'Recording...',
+    duration: 0.1, // Start with small duration
+    inPoint: 0,
+    outPoint: 0.1,
+    startTime: startTime,
+    thumbnails: [],
+    thumbnailsLoading: false,
+    isLive: true
+  };
+  
+  timelineClips.push(liveClip);
+  renderTimeline();
+  
+  // Update duration every 500ms
+  recordingState.updateInterval = setInterval(() => {
+    updateLiveClipDuration();
+  }, 500);
+}
+
+// Update live clip duration during recording
+function updateLiveClipDuration() {
+  if (!recordingState.isRecording || !recordingState.liveClipId) return;
+  
+  const elapsed = (Date.now() - recordingState.startTime) / 1000; // seconds
+  const liveClip = timelineClips.find(clip => clip.id === recordingState.liveClipId);
+  
+  if (liveClip) {
+    liveClip.duration = elapsed;
+    liveClip.outPoint = elapsed;
+    renderTimeline();
+  }
+}
+
+// Start recording
+async function startRecording() {
+  if (recordingState.isRecording) return;
+  
+  // Validate required sources
+  if (!desktopSourceSelect.value) {
+    alert('Please select a screen or window to record');
+    return;
+  }
+  
+  try {
+    // Initialize streams
+    const streamsInitialized = await initializeStreams();
+    if (!streamsInitialized) {
+      alert('Failed to initialize recording streams');
+      return;
+    }
+    
+    // Composite streams if needed
+    let finalVideoStream = recordingState.streams.desktop;
+    if (recordingState.streams.webcam) {
+      console.log('Webcam detected, starting compositing...');
+      finalVideoStream = compositeStreams();
+    } else {
+      console.log('No webcam, using desktop stream only');
+    }
+    
+    // Combine video and audio streams
+    const tracks = [...finalVideoStream.getTracks()];
+    if (recordingState.streams.audio) {
+      tracks.push(...recordingState.streams.audio.getTracks());
+    }
+    
+    const combinedStream = new MediaStream(tracks);
+    
+    // Setup MediaRecorder
+    const options = {
+      mimeType: 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
+    };
+    
+    // Fallback to WebM if MP4 not supported
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+      options.mimeType = 'video/webm; codecs="vp8, opus"';
+    }
+    
+    recordingState.mediaRecorder = new MediaRecorder(combinedStream, options);
+    recordingState.recordedChunks = [];
+    
+    recordingState.mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordingState.recordedChunks.push(event.data);
+      }
+    };
+    
+    recordingState.mediaRecorder.onstop = () => {
+      finalizeRecording();
+    };
+    
+    // Start recording
+    recordingState.mediaRecorder.start(1000); // Collect data every second
+    recordingState.isRecording = true;
+    recordingState.startTime = Date.now();
+    
+    // Update UI
+    startRecordingBtn.disabled = true;
+    stopRecordingBtn.disabled = false;
+    recordingTimer.style.display = 'block';
+    recordingIndicator.classList.add('active');
+    
+    // Add live clip to timeline
+    addLiveClipToTimeline();
+    
+    // Start timer
+    recordingState.timerInterval = setInterval(updateRecordingTimer, 1000);
+    
+    // Connect to video preview
+    videoEl.srcObject = combinedStream;
+    
+  } catch (err) {
+    console.error('Error starting recording:', err);
+    alert('Failed to start recording: ' + err.message);
+  }
+}
+
+// Update recording timer
+function updateRecordingTimer() {
+  if (!recordingState.isRecording) return;
+  
+  const elapsed = Date.now() - recordingState.startTime;
+  const seconds = Math.floor(elapsed / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  
+  const timeString = `${String(hours).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  recordingTimer.textContent = timeString;
+}
+
+// Stop recording
+function stopRecording() {
+  if (!recordingState.isRecording) return;
+  
+  recordingState.isRecording = false;
+  
+  if (recordingState.mediaRecorder && recordingState.mediaRecorder.state === 'recording') {
+    recordingState.mediaRecorder.stop();
+  }
+  
+  // Clear intervals
+  if (recordingState.timerInterval) {
+    clearInterval(recordingState.timerInterval);
+    recordingState.timerInterval = null;
+  }
+  
+  if (recordingState.updateInterval) {
+    clearInterval(recordingState.updateInterval);
+    recordingState.updateInterval = null;
+  }
+  
+  // Update UI
+  startRecordingBtn.disabled = false;
+  stopRecordingBtn.disabled = true;
+  recordingIndicator.classList.remove('active');
+  
+  // Stop video preview
+  videoEl.srcObject = null;
+}
+
+// Finalize recording and save file
+async function finalizeRecording() {
+  try {
+    // Create blob from recorded chunks
+    const blob = new Blob(recordingState.recordedChunks, { type: 'video/mp4' });
+    
+    // Convert blob to array buffer for IPC
+    const arrayBuffer = await blob.arrayBuffer();
+    const uint8Array = new Uint8Array(arrayBuffer);
+    
+    // Save via IPC
+    const result = await ipcRenderer.invoke('save-recording', uint8Array);
+    
+    if (result.success) {
+      // Add to imported clips
+      const clip = {
+        id: 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+        path: result.path,
+        originalPath: result.path,
+        name: result.fileName,
+        duration: recordingState.recordedChunks.length > 0 ? (Date.now() - recordingState.startTime) / 1000 : 10,
+        inPoint: 0,
+        outPoint: recordingState.recordedChunks.length > 0 ? (Date.now() - recordingState.startTime) / 1000 : 10
+      };
+      
+      importedClips.push(clip);
+      renderProjectFiles();
+      
+      // Replace live clip with permanent clip
+      finalizeLiveClip(clip);
+      
+      console.log('Recording saved:', result.path);
+    } else {
+      console.error('Failed to save recording:', result.error);
+    }
+    
+  } catch (err) {
+    console.error('Error finalizing recording:', err);
+  } finally {
+    // Cleanup streams
+    cleanupStreams();
+  }
+}
+
+// Finalize live clip
+function finalizeLiveClip(savedClip) {
+  if (!recordingState.liveClipId) return;
+  
+  const liveClipIndex = timelineClips.findIndex(clip => clip.id === recordingState.liveClipId);
+  if (liveClipIndex !== -1) {
+    const liveClip = timelineClips[liveClipIndex];
+    
+    // Update with saved clip data
+    liveClip.sourceId = savedClip.id;
+    liveClip.path = savedClip.path;
+    liveClip.originalPath = savedClip.originalPath;
+    liveClip.name = savedClip.name;
+    liveClip.duration = savedClip.duration;
+    liveClip.outPoint = savedClip.outPoint;
+    liveClip.isLive = false;
+    
+    renderTimeline();
+  }
+  
+  recordingState.liveClipId = null;
+}
+
+// Cleanup streams
+function cleanupStreams() {
+  // Stop all tracks
+  Object.values(recordingState.streams).forEach(stream => {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+  });
+  
+  // Reset streams
+  recordingState.streams = { desktop: null, webcam: null, audio: null };
+  
+  // Cleanup audio context
+  if (recordingState.audioContext) {
+    recordingState.audioContext.close();
+    recordingState.audioContext = null;
+    recordingState.analyser = null;
+  }
+  
+  // Cleanup canvas
+  recordingState.canvas = null;
+  recordingState.canvasStream = null;
+  
+  // Reset other state
+  recordingState.mediaRecorder = null;
+  recordingState.recordedChunks = [];
+  recordingState.startTime = null;
+}
+
+// Initialize recording DOM references
+function initializeRecordingElements() {
+  console.log('Initializing recording elements...');
+  
+  recordBtn = document.getElementById('recordBtn');
+  recordingModal = document.getElementById('recording-modal');
+  closeRecordingModal = document.getElementById('closeRecordingModal');
+  desktopSourceSelect = document.getElementById('desktopSourceSelect');
+  webcamSourceSelect = document.getElementById('webcamSourceSelect');
+  microphoneSourceSelect = document.getElementById('microphoneSourceSelect');
+  webcamToggle = document.getElementById('webcamToggle');
+  audioMeterBar = document.getElementById('audioMeterBar');
+  startRecordingBtn = document.getElementById('startRecordingBtn');
+  stopRecordingBtn = document.getElementById('stopRecordingBtn');
+  recordingTimer = document.getElementById('recordingTimer');
+  recordingIndicator = document.getElementById('recordingIndicator');
+  
+  console.log('Record button found:', !!recordBtn);
+  console.log('Recording modal found:', !!recordingModal);
+  
+  // Add event listeners
+  if (recordBtn) {
+    console.log('Adding click listener to record button');
+    recordBtn.addEventListener('click', () => {
+      console.log('Record button clicked!');
+      alert('Record button clicked!'); // Temporary debug alert
+      openRecordingModal();
+    });
+  } else {
+    console.error('Record button not found!');
+  }
+  
+  if (closeRecordingModal) {
+    closeRecordingModal.addEventListener('click', closeRecordingModalFunction);
+  }
+  
+  if (webcamToggle) {
+    webcamToggle.addEventListener('click', () => {
+      console.log('Webcam toggle clicked, current state:', webcamToggle.classList.contains('active'));
+      webcamToggle.classList.toggle('active');
+      webcamToggle.textContent = webcamToggle.classList.contains('active') ? 'Enabled' : 'None';
+      console.log('Webcam toggle new state:', webcamToggle.classList.contains('active'));
+    });
+  }
+  
+  if (startRecordingBtn) {
+    startRecordingBtn.addEventListener('click', startRecording);
+  }
+  
+  if (stopRecordingBtn) {
+    stopRecordingBtn.addEventListener('click', stopRecording);
+  }
+  
+  // Close modal on escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && recordingModal && recordingModal.classList.contains('show')) {
+      closeRecordingModalFunction();
+    }
+  });
+}
+
+// ===== EVENT LISTENERS =====
+
+// Init - wait for DOM to be ready
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('DOM loaded, initializing...');
+  initializeRecordingElements();
 setupClipDragAndResize();
 renderProjectFiles();
 renderTimeline();
+});
+
+// Also try immediate initialization as fallback
+if (document.readyState === 'loading') {
+  console.log('DOM still loading, waiting...');
+} else {
+  console.log('DOM already loaded, initializing immediately');
+  initializeRecordingElements();
+  setupClipDragAndResize();
+  renderProjectFiles();
+  renderTimeline();
+}

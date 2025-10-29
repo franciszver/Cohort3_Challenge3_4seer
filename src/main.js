@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -125,6 +125,45 @@ ipcMain.handle('extract-thumbnails', async (event, videoPath, duration) => {
     return { success: true, thumbnails };
   } catch (err) {
     console.error('Thumbnail extraction error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Get desktop sources for screen/window capture
+ipcMain.handle('get-desktop-sources', async (event) => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 150, height: 150 }
+    });
+    
+    return { success: true, sources: sources.map(source => ({
+      id: source.id,
+      name: source.name,
+      type: source.id.startsWith('screen:') ? 'screen' : 'window',
+      thumbnail: source.thumbnail.toDataURL()
+    })) };
+  } catch (err) {
+    console.error('Desktop sources error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Save recording blob to temp directory
+ipcMain.handle('save-recording', async (event, blobData) => {
+  try {
+    const tempDirPath = getTempDir();
+    const timestamp = Date.now();
+    const fileName = `recording_${timestamp}.mp4`;
+    const filePath = path.join(tempDirPath, fileName);
+    
+    // Convert blob data to buffer and save
+    const buffer = Buffer.from(blobData);
+    fs.writeFileSync(filePath, buffer);
+    
+    return { success: true, path: filePath, fileName };
+  } catch (err) {
+    console.error('Save recording error:', err);
     return { success: false, error: err.message };
   }
 });
