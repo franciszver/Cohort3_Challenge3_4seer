@@ -33,6 +33,7 @@ const videoEl = document.getElementById('video');
 const inPointInput = document.getElementById('inPointInput');
 const outPointInput = document.getElementById('outPointInput');
 const applyTrimBtn = document.getElementById('applyTrimBtn');
+const deleteClipBtn = document.getElementById('deleteClipBtn');
 const exportBtn = document.getElementById('exportBtn');
 const exportStatusEl = document.getElementById('exportStatus');
 const exportProgressBar = document.getElementById('exportProgressBar');
@@ -43,9 +44,10 @@ const playhead = document.getElementById('playhead');
 const timelineRuler = document.getElementById('timeline-ruler');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
+const audioOutputSelect = document.getElementById('audioOutputSelect');
 
 // Recording DOM refs - will be initialized after DOM loads
-let recordBtn, recordingModal, closeRecordingModal, desktopSourceSelect, webcamSourceSelect, microphoneSourceSelect, webcamToggle, audioMeterBar, startRecordingBtn, stopRecordingBtn, recordingTimer, recordingIndicator;
+let recordBtn, recordingModal, closeRecordingModal, desktopSourceSelect, webcamSourceSelect, microphoneSourceSelect, webcamToggle, startRecordingBtn, recordingTimer, recordingIndicator;
 
 // File input for click-to-select
 const fileInput = document.createElement('input');
@@ -160,6 +162,25 @@ function renderTimeline() {
     
     el.appendChild(thumbContainer);
     
+    // Audio waveform container
+    const waveformContainer = document.createElement('div');
+    waveformContainer.className = 'timeline-clip-waveform';
+    waveformContainer.style.position = 'absolute';
+    waveformContainer.style.bottom = '0';
+    waveformContainer.style.left = '0';
+    waveformContainer.style.width = '100%';
+    waveformContainer.style.height = '20px';
+    waveformContainer.style.background = 'rgba(0, 0, 0, 0.3)';
+    
+    if (clip.audioWaveform && clip.audioWaveform.length > 0) {
+      renderWaveform(waveformContainer, clip.audioWaveform, width);
+    } else if (!clip.isLive && clip.path) {
+      // Generate waveform for non-live clips
+      generateAudioWaveform(clip);
+    }
+    
+    el.appendChild(waveformContainer);
+    
     // Label
     const label = document.createElement('div');
     label.className = 'timeline-clip-label';
@@ -207,11 +228,16 @@ function selectTimelineClip(idx) {
   
   // Load video preview
   videoEl.src = clip.path;
+  videoEl.muted = false; // Ensure audio is enabled for playback
   videoEl.load();
   
   // Set to start at inPoint
   videoEl.addEventListener('loadedmetadata', () => {
     videoEl.currentTime = clip.inPoint || 0;
+    // Verify audio tracks
+    if (videoEl.audioTracks && videoEl.audioTracks.length > 0) {
+      console.log('Video has audio tracks:', videoEl.audioTracks.length);
+    }
   }, { once: true });
 }
 
@@ -593,6 +619,41 @@ function recalculateTimelinePositions() {
   });
 }
 
+// Delete selected clip from timeline
+function deleteSelectedClip() {
+  if (selectedClipIndex === null || selectedClipIndex < 0 || selectedClipIndex >= timelineClips.length) {
+    return;
+  }
+  
+  const deletedIndex = selectedClipIndex;
+  
+  // Remove the clip from timeline
+  timelineClips.splice(selectedClipIndex, 1);
+  
+  // Clear selection and video preview
+  selectedClipIndex = null;
+  videoEl.src = '';
+  videoEl.load();
+  
+  // Clear properties panel
+  if (inPointInput) inPointInput.value = '0';
+  if (outPointInput) outPointInput.value = '0';
+  
+  // Recalculate timeline positions
+  recalculateTimelinePositions();
+  
+  // Re-render timeline
+  renderTimeline();
+  
+  // If there are still clips, select the one at the deleted position (or the last one if it was the last)
+  if (timelineClips.length > 0) {
+    const newIndex = Math.min(deletedIndex, timelineClips.length - 1);
+    selectTimelineClip(newIndex);
+  }
+  
+  console.log('Clip deleted from timeline');
+}
+
 // Export
 function exportConcatenated() {
   if (timelineClips.length === 0) {
@@ -616,11 +677,26 @@ function exportConcatenated() {
 
 exportBtn?.addEventListener('click', exportConcatenated);
 
-// Cancel export with Escape key
+// Delete clip button
+if (deleteClipBtn) {
+  deleteClipBtn.addEventListener('click', () => {
+    if (selectedClipIndex !== null) {
+      deleteSelectedClip();
+    }
+  });
+}
+
+// Cancel export with Escape key, Delete/Backspace for clip deletion
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     ipcRenderer.send('cancel-export');
     setExportStatus('Export canceled', '#ff4444');
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIndex !== null) {
+    // Only delete if not typing in an input field
+    if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+      e.preventDefault();
+      deleteSelectedClip();
+    }
   }
 });
 
@@ -812,6 +888,111 @@ function finishDrag() {
   renderTimeline();
 }
 
+// ===== AUDIO WAVEFORM FUNCTIONS =====
+
+// Generate audio waveform data from video file
+async function generateAudioWaveform(clip) {
+  try {
+    // Check if already generating
+    if (clip.audioWaveformGenerating) return;
+    clip.audioWaveformGenerating = true;
+    
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Create audio element to load the file
+    const audio = new Audio();
+    audio.crossOrigin = 'anonymous';
+    audio.src = clip.path;
+    
+    // Load audio into AudioContext
+    const source = audioContext.createMediaElementSource(audio);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    analyser.connect(audioContext.destination);
+    
+    // Wait for audio to load metadata
+    await new Promise((resolve, reject) => {
+      audio.addEventListener('loadedmetadata', resolve);
+      audio.addEventListener('error', reject);
+      audio.load();
+      setTimeout(reject, 10000); // 10 second timeout
+    });
+    
+    // Play and capture audio data
+    audio.play();
+    await new Promise(resolve => setTimeout(resolve, 100)); // Let it start playing
+    
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteTimeDomainData(dataArray);
+    
+    audio.pause();
+    audio.currentTime = 0;
+    
+    // Extract waveform samples
+    const samples = 100; // Number of waveform points
+    const blockSize = Math.floor(bufferLength / samples);
+    const waveform = [];
+    
+    for (let i = 0; i < samples; i++) {
+      let sum = 0;
+      for (let j = 0; j < blockSize; j++) {
+        const idx = i * blockSize + j;
+        if (idx < bufferLength) {
+          sum += Math.abs(dataArray[idx] - 128) / 128; // Normalize to 0-1
+        }
+      }
+      waveform.push(sum / blockSize);
+    }
+    
+    // Normalize waveform values
+    const max = Math.max(...waveform);
+    if (max > 0) {
+      clip.audioWaveform = waveform.map(val => val / max);
+    } else {
+      clip.audioWaveform = waveform;
+    }
+    
+    clip.audioWaveformGenerating = false;
+    
+    // Re-render timeline to show waveform
+    renderTimeline();
+    
+  } catch (err) {
+    console.error('Error generating waveform:', err);
+    clip.audioWaveformGenerating = false;
+    // Create empty waveform on error
+    clip.audioWaveform = [];
+  }
+}
+
+// Render waveform visualization
+function renderWaveform(container, waveform, clipWidth) {
+  const canvas = document.createElement('canvas');
+  canvas.width = clipWidth;
+  canvas.height = 20;
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  
+  const ctx = canvas.getContext('2d');
+  const centerY = canvas.height / 2;
+  const barWidth = Math.max(1, clipWidth / waveform.length);
+  
+  ctx.fillStyle = '#4a9eff';
+  
+  waveform.forEach((value, index) => {
+    const x = index * barWidth;
+    const height = value * (canvas.height - 4); // Leave 2px padding top/bottom
+    const y = centerY - height / 2;
+    
+    ctx.fillRect(x, y, barWidth - 1, height);
+  });
+  
+  container.innerHTML = '';
+  container.appendChild(canvas);
+}
+
 // ===== RECORDING FUNCTIONS =====
 
 // Open recording modal and populate source lists
@@ -834,7 +1015,13 @@ async function openRecordingModal() {
       desktopResult.sources.forEach(source => {
         const option = document.createElement('option');
         option.value = source.id;
-        option.textContent = `${source.type === 'screen' ? 'Screen' : 'Window'}: ${source.name}`;
+        // Truncate long names to prevent overflow
+        let displayText = `${source.type === 'screen' ? 'Screen' : 'Window'}: ${source.name}`;
+        if (displayText.length > 60) {
+          displayText = displayText.substring(0, 57) + '...';
+        }
+        option.textContent = displayText;
+        option.title = `${source.type === 'screen' ? 'Screen' : 'Window'}: ${source.name}`; // Full text on hover
         desktopSourceSelect.appendChild(option);
       });
     }
@@ -846,7 +1033,12 @@ async function openRecordingModal() {
     videoDevices.forEach(device => {
       const option = document.createElement('option');
       option.value = device.deviceId;
-      option.textContent = device.label || `Camera ${device.deviceId.substring(0, 8)}`;
+      let displayText = device.label || `Camera ${device.deviceId.substring(0, 8)}`;
+      if (displayText.length > 50) {
+        displayText = displayText.substring(0, 47) + '...';
+      }
+      option.textContent = displayText;
+      option.title = device.label || `Camera ${device.deviceId}`; // Full text on hover
       webcamSourceSelect.appendChild(option);
     });
     
@@ -856,7 +1048,12 @@ async function openRecordingModal() {
     audioDevices.forEach(device => {
       const option = document.createElement('option');
       option.value = device.deviceId;
-      option.textContent = device.label || `Microphone ${device.deviceId.substring(0, 8)}`;
+      let displayText = device.label || `Microphone ${device.deviceId.substring(0, 8)}`;
+      if (displayText.length > 50) {
+        displayText = displayText.substring(0, 47) + '...';
+      }
+      option.textContent = displayText;
+      option.title = device.label || `Microphone ${device.deviceId}`; // Full text on hover
       microphoneSourceSelect.appendChild(option);
     });
     
@@ -872,12 +1069,13 @@ function closeRecordingModalFunction() {
   desktopSourceSelect.value = '';
   webcamSourceSelect.value = '';
   microphoneSourceSelect.value = '';
-  webcamToggle.textContent = 'None';
+  webcamToggle.textContent = 'Disabled';
   webcamToggle.classList.remove('active');
-  audioMeterBar.style.width = '0%';
+  if (webcamSourceSelect) {
+    webcamSourceSelect.disabled = true;
+  }
   recordingTimer.style.display = 'none';
   startRecordingBtn.disabled = false;
-  stopRecordingBtn.disabled = true;
 }
 
 // Get desktop sources via IPC
@@ -930,15 +1128,23 @@ async function initializeStreams() {
     
     // Audio stream
     if (microphoneSourceId) {
+      console.log('Initializing microphone stream with device:', microphoneSourceId);
       recordingState.streams.audio = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: { exact: microphoneSourceId }
         },
         video: false
       });
-      
-      // Setup audio level meter
-      setupAudioMeter(recordingState.streams.audio);
+      console.log('Microphone stream created:', recordingState.streams.audio);
+      console.log('Microphone audio tracks:', recordingState.streams.audio.getTracks().map(t => ({
+        kind: t.kind,
+        label: t.label,
+        enabled: t.enabled,
+        muted: t.muted,
+        readyState: t.readyState
+      })));
+    } else {
+      console.warn('No microphone source selected!');
     }
     
     return true;
@@ -948,35 +1154,6 @@ async function initializeStreams() {
   }
 }
 
-// Setup audio level meter
-function setupAudioMeter(audioStream) {
-  recordingState.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  recordingState.analyser = recordingState.audioContext.createAnalyser();
-  const source = recordingState.audioContext.createMediaStreamSource(audioStream);
-  
-  source.connect(recordingState.analyser);
-  recordingState.analyser.fftSize = 256;
-  
-  updateAudioMeter();
-}
-
-// Update audio level meter
-function updateAudioMeter() {
-  if (!recordingState.analyser) return;
-  
-  const dataArray = new Uint8Array(recordingState.analyser.frequencyBinCount);
-  recordingState.analyser.getByteFrequencyData(dataArray);
-  
-  // Calculate average volume
-  const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
-  const percentage = Math.min(100, (average / 255) * 100);
-  
-  audioMeterBar.style.width = percentage + '%';
-  
-  if (recordingState.isRecording) {
-    requestAnimationFrame(updateAudioMeter);
-  }
-}
 
 // Composite streams using canvas
 function compositeStreams() {
@@ -1121,10 +1298,17 @@ async function startRecording() {
     
     // Combine video and audio streams
     const tracks = [...finalVideoStream.getTracks()];
+    console.log('Video tracks:', tracks.length, tracks.map(t => ({kind: t.kind, label: t.label})));
+    
     if (recordingState.streams.audio) {
-      tracks.push(...recordingState.streams.audio.getTracks());
+      const audioTracks = recordingState.streams.audio.getTracks();
+      console.log('Audio tracks found:', audioTracks.length, audioTracks.map(t => ({kind: t.kind, label: t.label, enabled: t.enabled})));
+      tracks.push(...audioTracks);
+    } else {
+      console.warn('No audio stream available for recording!');
     }
     
+    console.log('Combined stream tracks:', tracks.length, tracks.map(t => ({kind: t.kind, label: t.label})));
     const combinedStream = new MediaStream(tracks);
     
     // Setup MediaRecorder
@@ -1157,9 +1341,16 @@ async function startRecording() {
     
     // Update UI
     startRecordingBtn.disabled = true;
-    stopRecordingBtn.disabled = false;
     recordingTimer.style.display = 'block';
     recordingIndicator.classList.add('active');
+    
+    // Close recording modal
+    recordingModal.classList.remove('show');
+    
+    // Change record button to stop button
+    recordBtn.textContent = '■';
+    recordBtn.style.background = '#f44336';
+    recordBtn.classList.add('recording-active');
     
     // Add live clip to timeline
     addLiveClipToTimeline();
@@ -1169,10 +1360,19 @@ async function startRecording() {
     
     // Connect to video preview
     videoEl.srcObject = combinedStream;
+    videoEl.muted = true; // Mute preview to avoid feedback
+    videoEl.play().catch(err => {
+      console.error('Error playing preview:', err);
+    });
     
   } catch (err) {
     console.error('Error starting recording:', err);
     alert('Failed to start recording: ' + err.message);
+    
+    // Reset button on error
+    recordBtn.textContent = '🔴';
+    recordBtn.style.background = '';
+    recordBtn.classList.remove('recording-active');
   }
 }
 
@@ -1212,8 +1412,12 @@ function stopRecording() {
   
   // Update UI
   startRecordingBtn.disabled = false;
-  stopRecordingBtn.disabled = true;
   recordingIndicator.classList.remove('active');
+  
+  // Reset record button
+  recordBtn.textContent = '🔴';
+  recordBtn.style.background = '';
+  recordBtn.classList.remove('recording-active');
   
   // Stop video preview
   videoEl.srcObject = null;
@@ -1281,6 +1485,8 @@ function finalizeLiveClip(savedClip) {
     liveClip.isLive = false;
     
     renderTimeline();
+    
+    // Waveform will be generated automatically by renderTimeline since clip now has a path and isLive is false
   }
   
   recordingState.liveClipId = null;
@@ -1326,9 +1532,7 @@ function initializeRecordingElements() {
   webcamSourceSelect = document.getElementById('webcamSourceSelect');
   microphoneSourceSelect = document.getElementById('microphoneSourceSelect');
   webcamToggle = document.getElementById('webcamToggle');
-  audioMeterBar = document.getElementById('audioMeterBar');
   startRecordingBtn = document.getElementById('startRecordingBtn');
-  stopRecordingBtn = document.getElementById('stopRecordingBtn');
   recordingTimer = document.getElementById('recordingTimer');
   recordingIndicator = document.getElementById('recordingIndicator');
   
@@ -1340,8 +1544,14 @@ function initializeRecordingElements() {
     console.log('Adding click listener to record button');
     recordBtn.addEventListener('click', () => {
       console.log('Record button clicked!');
-      alert('Record button clicked!'); // Temporary debug alert
-      openRecordingModal();
+      // If recording is active, stop it
+      if (recordingState.isRecording) {
+        console.log('Stopping recording from button click');
+        stopRecording();
+      } else {
+        // Otherwise open recording modal
+        openRecordingModal();
+      }
     });
   } else {
     console.error('Record button not found!');
@@ -1354,9 +1564,23 @@ function initializeRecordingElements() {
   if (webcamToggle) {
     webcamToggle.addEventListener('click', () => {
       console.log('Webcam toggle clicked, current state:', webcamToggle.classList.contains('active'));
+      const wasActive = webcamToggle.classList.contains('active');
       webcamToggle.classList.toggle('active');
-      webcamToggle.textContent = webcamToggle.classList.contains('active') ? 'Enabled' : 'None';
-      console.log('Webcam toggle new state:', webcamToggle.classList.contains('active'));
+      const isNowActive = webcamToggle.classList.contains('active');
+      
+      // Update button text
+      webcamToggle.textContent = isNowActive ? 'Enabled' : 'Disabled';
+      
+      // Enable/disable dropdown
+      if (webcamSourceSelect) {
+        webcamSourceSelect.disabled = !isNowActive;
+        // Clear selection if disabling
+        if (!isNowActive) {
+          webcamSourceSelect.value = '';
+        }
+      }
+      
+      console.log('Webcam toggle new state:', isNowActive);
     });
   }
   
@@ -1364,9 +1588,6 @@ function initializeRecordingElements() {
     startRecordingBtn.addEventListener('click', startRecording);
   }
   
-  if (stopRecordingBtn) {
-    stopRecordingBtn.addEventListener('click', stopRecording);
-  }
   
   // Close modal on escape key
   document.addEventListener('keydown', (e) => {
@@ -1378,9 +1599,65 @@ function initializeRecordingElements() {
 
 // ===== EVENT LISTENERS =====
 
+// Initialize audio output device selector
+async function initializeAudioOutput() {
+  if (!audioOutputSelect) return;
+  
+  try {
+    // Check if setSinkId is supported
+    if (!('setSinkId' in HTMLMediaElement.prototype)) {
+      console.log('Audio output selection not supported in this browser');
+      audioOutputSelect.style.display = 'none';
+      return;
+    }
+    
+    // Get available audio output devices
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioOutputs = devices.filter(device => device.kind === 'audiooutput');
+    
+    // Populate dropdown
+    audioOutputSelect.innerHTML = '<option value="">Default Audio</option>';
+    audioOutputs.forEach(device => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || `Audio Output ${audioOutputs.indexOf(device) + 1}`;
+      audioOutputSelect.appendChild(option);
+    });
+    
+    // Handle selection change
+    audioOutputSelect.addEventListener('change', async (e) => {
+      const deviceId = e.target.value;
+      if (deviceId && videoEl) {
+        try {
+          await videoEl.setSinkId(deviceId);
+          console.log('Audio output set to:', deviceId);
+        } catch (err) {
+          console.error('Error setting audio output:', err);
+          alert('Failed to set audio output device: ' + err.message);
+        }
+      } else if (videoEl) {
+        // Reset to default
+        try {
+          await videoEl.setSinkId('');
+          console.log('Audio output reset to default');
+        } catch (err) {
+          console.error('Error resetting audio output:', err);
+        }
+      }
+    });
+    
+  } catch (err) {
+    console.error('Error initializing audio output selector:', err);
+    if (audioOutputSelect) {
+      audioOutputSelect.style.display = 'none';
+    }
+  }
+}
+
 // Init - wait for DOM to be ready
 document.addEventListener('DOMContentLoaded', () => {
   console.log('DOM loaded, initializing...');
+  initializeAudioOutput();
   initializeRecordingElements();
 setupClipDragAndResize();
 renderProjectFiles();
@@ -1392,6 +1669,7 @@ if (document.readyState === 'loading') {
   console.log('DOM still loading, waiting...');
 } else {
   console.log('DOM already loaded, initializing immediately');
+  initializeAudioOutput();
   initializeRecordingElements();
   setupClipDragAndResize();
   renderProjectFiles();

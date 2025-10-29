@@ -45,6 +45,27 @@
         color: #b0b0b0;
         text-transform: uppercase;
         letter-spacing: 0.5px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .audio-output-select {
+        background: #3a3a3a;
+        border: 1px solid #4a4a4a;
+        color: #e0e0e0;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 11px;
+        text-transform: none;
+        letter-spacing: 0;
+        max-width: 200px;
+        min-width: 120px;
+      }
+
+      .audio-output-select:focus {
+        outline: none;
+        border-color: #4a9eff;
       }
 
       .panel-content {
@@ -241,6 +262,14 @@
 
       .property-btn:hover {
         background: #3a8eef;
+      }
+
+      .property-btn.delete-btn {
+        background: #f44336;
+      }
+
+      .property-btn.delete-btn:hover {
+        background: #d32f2f;
       }
 
       #export-section {
@@ -515,6 +544,8 @@
         width: 400px;
         max-width: 90vw;
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        overflow-x: hidden;
+        position: relative;
       }
 
       .modal-header {
@@ -555,6 +586,7 @@
         align-items: center;
         margin-bottom: 15px;
         gap: 10px;
+        min-width: 0;
       }
 
       .source-label {
@@ -571,11 +603,30 @@
         padding: 6px 8px;
         border-radius: 3px;
         font-size: 12px;
+        max-width: calc(100% - 20px);
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .source-select:focus {
         outline: none;
         border-color: #4a9eff;
+      }
+
+      .source-select:disabled {
+        background: #2a2a2a;
+        color: #666;
+        cursor: not-allowed;
+      }
+
+      /* Note: Native select dropdown options can't be fully styled, but we'll truncate text programmatically */
+      .source-select option {
+        max-width: 350px;
+        white-space: normal;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .source-toggle {
@@ -593,32 +644,6 @@
         border-color: #4a9eff;
       }
 
-      .audio-meter-container {
-        margin: 15px 0;
-      }
-
-      .audio-meter-label {
-        font-size: 12px;
-        color: #b0b0b0;
-        margin-bottom: 5px;
-      }
-
-      .audio-meter {
-        width: 100%;
-        height: 20px;
-        background: #1a1a1a;
-        border: 1px solid #3a3a3a;
-        border-radius: 3px;
-        overflow: hidden;
-        position: relative;
-      }
-
-      .audio-meter-bar {
-        height: 100%;
-        background: linear-gradient(to right, #4caf50, #ffeb3b, #f44336);
-        width: 0%;
-        transition: width 0.1s ease;
-      }
 
       .recording-controls {
         display: flex;
@@ -688,6 +713,28 @@
         50% { opacity: 0.5; }
         100% { opacity: 1; }
       }
+
+      /* Recording active button styling */
+      #recordBtn.recording-active {
+        background: #f44336 !important;
+        border-color: #d32f2f !important;
+        animation: blink-recording 1s infinite;
+      }
+
+      @keyframes blink-recording {
+        0% { 
+          opacity: 1;
+          box-shadow: 0 0 10px rgba(244, 67, 54, 0.8);
+        }
+        50% { 
+          opacity: 0.7;
+          box-shadow: 0 0 20px rgba(244, 67, 54, 1);
+        }
+        100% { 
+          opacity: 1;
+          box-shadow: 0 0 10px rgba(244, 67, 54, 0.8);
+        }
+      }
     </style>
   </head>
   <body>
@@ -705,7 +752,12 @@
 
       <!-- Top-right: Video Preview -->
       <div id="preview-panel" class="panel">
-        <div class="panel-header">Video Preview</div>
+        <div class="panel-header">
+          <span>Video Preview</span>
+          <select id="audioOutputSelect" class="audio-output-select" title="Select audio output device">
+            <option value="">Default Audio</option>
+          </select>
+        </div>
         <div class="panel-content" style="padding: 0;">
           <div id="video-container">
             <video id="video"></video>
@@ -734,6 +786,9 @@
             </div>
             <div class="property-row">
               <button id="applyTrimBtn" class="property-btn">Apply Trim</button>
+            </div>
+            <div class="property-row">
+              <button id="deleteClipBtn" class="property-btn delete-btn">Delete Clip</button>
             </div>
           </div>
           
@@ -788,10 +843,10 @@
         
         <div class="source-row">
           <div class="source-label">Webcam:</div>
-          <select class="source-select" id="webcamSourceSelect">
+          <button class="source-toggle" id="webcamToggle">Disabled</button>
+          <select class="source-select" id="webcamSourceSelect" disabled>
             <option value="">Select webcam...</option>
           </select>
-          <button class="source-toggle" id="webcamToggle">None</button>
         </div>
         
         <div class="source-row">
@@ -801,16 +856,8 @@
           </select>
         </div>
         
-        <div class="audio-meter-container">
-          <div class="audio-meter-label">Audio Level:</div>
-          <div class="audio-meter">
-            <div class="audio-meter-bar" id="audioMeterBar"></div>
-          </div>
-        </div>
-        
         <div class="recording-controls">
           <button class="recording-btn" id="startRecordingBtn">● Start Recording</button>
-          <button class="recording-btn stop" id="stopRecordingBtn" disabled>■ Stop Recording</button>
         </div>
         
         <div class="recording-timer" id="recordingTimer" style="display: none;">00:00:00</div>
