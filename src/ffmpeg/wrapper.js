@@ -321,6 +321,7 @@ async function createBaseVideoWithGaps(track1Clips, totalDuration, outputPath, r
   // Build complex filter: concat clips and fill gaps with black
   const filterParts = [];
   const inputArgs = [];
+  const clipToInputIndex = new Map(); // Map clips to their input indices for audio extraction
   let inputIndex = 0;
   let lastEndTime = 0;
   
@@ -345,6 +346,8 @@ async function createBaseVideoWithGaps(track1Clips, totalDuration, outputPath, r
     } else {
       inputArgs.push('-i', clip.path);
     }
+    // Track this clip's input index for audio extraction
+    clipToInputIndex.set(clip, inputIndex);
     // Scale video clip to target resolution before concat
     const scaledLabel = `scaled${inputIndex}`;
     filterParts.push(`[${inputIndex}:v]scale=${targetWidth}:${targetHeight}[${scaledLabel}]`);
@@ -388,20 +391,13 @@ async function createBaseVideoWithGaps(track1Clips, totalDuration, outputPath, r
   // Build all filter parts - combine scale filters (filterParts) with concat
   const allFilterParts = [...filterParts, concatFilter];
   
-  // Get audio from unmuted clips and build audio filter
+  // Get audio from unmuted clips using the same input indices as video
   const audioInputIndices = [];
-  let audioInputCount = 0;
   track1Clips.forEach((clip) => {
-    if (!clip.muted && clip.path) {
-      const clipInputIdx = inputIndex + audioInputCount;
-      const hasTrim = clip.outPoint > 0 && clip.outPoint > clip.inPoint;
-      if (hasTrim) {
-        inputArgs.push('-ss', String(clip.inPoint), '-to', String(clip.outPoint), '-i', clip.path);
-      } else {
-        inputArgs.push('-i', clip.path);
-      }
+    if (!clip.muted && clip.path && clipToInputIndex.has(clip)) {
+      // Use the same input index that was used for this clip's video
+      const clipInputIdx = clipToInputIndex.get(clip);
       audioInputIndices.push(clipInputIdx);
-      audioInputCount++;
     }
   });
   
