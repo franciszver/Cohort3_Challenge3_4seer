@@ -169,11 +169,14 @@ function renderTimeline() {
     
     // Display thumbnails if available
     if (clip.thumbnails && clip.thumbnails.length > 0) {
+      const thumbnailCount = clip.thumbnails.length;
+      const thumbnailWidth = width / thumbnailCount;
       clip.thumbnails.forEach(thumbPath => {
         const img = document.createElement('img');
         img.className = 'timeline-clip-thumbnail';
         img.src = thumbPath;
-        img.style.width = '50px';
+        img.style.width = thumbnailWidth + 'px';
+        img.style.flexShrink = '0';
         thumbContainer.appendChild(img);
       });
     } else if (clip.thumbnailsLoading) {
@@ -341,9 +344,15 @@ function updateCompositePreview() {
     }
     
     if (previewState.track1Video.paused && timelinePlaybackState.isPlaying) {
-      previewState.track1Video.play().catch(() => {});
+      previewState.track1Video.play().catch(() => {
+        // Ignore play() interruptions
+      });
     } else if (!previewState.track1Video.paused && !timelinePlaybackState.isPlaying) {
-      previewState.track1Video.pause();
+      try {
+        previewState.track1Video.pause();
+      } catch (e) {
+        // Ignore pause errors
+      }
     }
   }
   
@@ -357,9 +366,15 @@ function updateCompositePreview() {
     }
     
     if (previewState.track2Video.paused && timelinePlaybackState.isPlaying) {
-      previewState.track2Video.play().catch(() => {});
+      previewState.track2Video.play().catch(() => {
+        // Ignore play() interruptions
+      });
     } else if (!previewState.track2Video.paused && !timelinePlaybackState.isPlaying) {
-      previewState.track2Video.pause();
+      try {
+        previewState.track2Video.pause();
+      } catch (e) {
+        // Ignore pause errors
+      }
     }
   }
   
@@ -873,11 +888,15 @@ function startTimelinePlayback() {
   updateTimelinePlayback();
   
   // Start video elements playing if they have clips
-  if (previewState.track1Video && previewState.track1Clip && !previewState.track1Video.paused === false) {
-    previewState.track1Video.play().catch(() => {});
+  if (previewState.track1Video && previewState.track1Clip) {
+    previewState.track1Video.play().catch((e) => {
+      // Ignore play() interruptions - usually happens when play/pause called rapidly
+    });
   }
-  if (previewState.track2Video && previewState.track2Clip && !previewState.track2Video.paused === false) {
-    previewState.track2Video.play().catch(() => {});
+  if (previewState.track2Video && previewState.track2Clip) {
+    previewState.track2Video.play().catch((e) => {
+      // Ignore play() interruptions - usually happens when play/pause called rapidly
+    });
   }
 }
 
@@ -1364,7 +1383,9 @@ function exportConcatenated() {
 
 function performExport() {
   setExportStatus('Starting export...', '#4a9eff');
-  ipcRenderer.invoke('export-video', timelineClips)
+  const resolutionSelect = document.getElementById('export-resolution-select');
+  const resolution = resolutionSelect ? resolutionSelect.value : 'source';
+  ipcRenderer.invoke('export-video', timelineClips, resolution)
     .then((response) => {
       if (response && response.success) {
         setExportStatus('Export completed: ' + (response.path || 'unknown'), '#4caf50');
@@ -1720,6 +1741,22 @@ function checkOverlap(clipIndex, newStartTime, clipDuration, track) {
 }
 
 // Setup drag and resize handlers
+// Setup synchronized scrolling between tracks
+function setupSynchronizedScrolling() {
+  if (!track1Content || !track2Content || !timelineScrollWrapper) return;
+  
+  // Use the wrapper's scroll since tracks are children
+  // The wrapper already handles scrolling for both tracks
+  // This function exists for potential future enhancements
+  let isScrolling = false;
+  
+  timelineScrollWrapper.addEventListener('scroll', () => {
+    if (isScrolling) return;
+    // Tracks scroll together via the wrapper, no action needed
+    // But we could add ruler sync here if needed
+  });
+}
+
 function setupClipDragAndResize() {
   // Listen on both tracks
   function handleMouseDown(e, trackContentElement) {
