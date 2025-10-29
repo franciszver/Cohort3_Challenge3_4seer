@@ -32,7 +32,12 @@
     "electron": "^25.0.0",
     "electron-builder": "^26.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@aws-sdk/client-transcribe": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/credential-providers": "^3.0.0",
+    "openai": "^4.0.0"
+  }
 }
 
 

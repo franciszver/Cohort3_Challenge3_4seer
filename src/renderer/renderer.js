@@ -685,6 +685,8 @@ function exportConcatenated() {
     .then((response) => {
       if (response && response.success) {
         setExportStatus('Export completed: ' + (response.path || 'unknown'), '#4caf50');
+        // Show press kit generation popup
+        showPressKitPopup(response.path);
       } else {
         setExportStatus('Export failed' + (response && response.error ? ': ' + response.error : ''), '#ff4444');
       }
@@ -1867,14 +1869,494 @@ async function initializeAudioOutput() {
   }
 }
 
+// ===== PRESS KIT GENERATION FUNCTIONS =====
+
+// Press kit modal DOM refs
+let presskitModal, closePressKitModal, presskitYesBtn, presskitNoBtn;
+let presskitQuestion, presskitProgress, presskitStatus, presskitProgressBar;
+let presskitError, presskitErrorMessage, presskitErrorClose;
+let presskitSuccess, presskitSuccessPath, presskitSuccessClose;
+let lastExportedVideoPath = null;
+
+// Show press kit popup after export
+function showPressKitPopup(videoPath) {
+  if (!presskitModal) {
+    console.error('Press kit modal not found!');
+    return;
+  }
+  
+  lastExportedVideoPath = videoPath;
+  presskitModal.classList.add('show');
+  
+  // Reset to question view
+  if (presskitQuestion) presskitQuestion.style.display = 'block';
+  if (presskitProgress) presskitProgress.style.display = 'none';
+  if (presskitError) presskitError.style.display = 'none';
+  if (presskitSuccess) presskitSuccess.style.display = 'none';
+}
+
+// Close press kit modal
+function closePressKitModalFunction() {
+  if (presskitModal) {
+    presskitModal.classList.remove('show');
+  }
+  lastExportedVideoPath = null;
+}
+
+// Show progress view
+function showPressKitProgress(message, progress = 0) {
+  if (presskitQuestion) presskitQuestion.style.display = 'none';
+  if (presskitProgress) presskitProgress.style.display = 'block';
+  if (presskitError) presskitError.style.display = 'none';
+  if (presskitSuccess) presskitSuccess.style.display = 'none';
+  
+  if (presskitStatus) presskitStatus.textContent = message;
+  if (presskitProgressBar) presskitProgressBar.style.width = progress + '%';
+}
+
+// Show error view
+function showPressKitError(message) {
+  if (presskitQuestion) presskitQuestion.style.display = 'none';
+  if (presskitProgress) presskitProgress.style.display = 'none';
+  if (presskitError) presskitError.style.display = 'block';
+  if (presskitSuccess) presskitSuccess.style.display = 'none';
+  
+  if (presskitErrorMessage) presskitErrorMessage.textContent = message;
+}
+
+// Show success view
+function showPressKitSuccess(filePath) {
+  if (presskitQuestion) presskitQuestion.style.display = 'none';
+  if (presskitProgress) presskitProgress.style.display = 'none';
+  if (presskitError) presskitError.style.display = 'none';
+  if (presskitSuccess) presskitSuccess.style.display = 'block';
+  
+  if (presskitSuccessPath) presskitSuccessPath.textContent = 'Saved to: ' + filePath;
+}
+
+// Generate press kit workflow
+async function generatePressKitWorkflow() {
+  if (!lastExportedVideoPath) {
+    showPressKitError('No video file available');
+    return;
+  }
+  
+  // Check if credentials are configured
+  try {
+    const hasCredentials = await ipcRenderer.invoke('check-credentials-configured');
+    if (!hasCredentials) {
+      closePressKitModalFunction();
+      // Show settings modal
+      setTimeout(() => {
+        openSettingsModal();
+        if (exportStatusEl) {
+          exportStatusEl.textContent = 'Please configure API credentials to use this feature';
+          exportStatusEl.style.color = '#ff9800';
+        }
+      }, 100);
+      return;
+    }
+  } catch (err) {
+    showPressKitError('Failed to check credentials: ' + err.message);
+    return;
+  }
+  
+  try {
+    // Step 1: Transcribe video
+    showPressKitProgress('Transcribing video...', 25);
+    const transcriptResult = await ipcRenderer.invoke('transcribe-video', lastExportedVideoPath);
+    
+    if (!transcriptResult || !transcriptResult.success) {
+      showPressKitError(transcriptResult?.error || 'Failed to transcribe video');
+      return;
+    }
+    
+    const transcript = transcriptResult.transcript;
+    if (!transcript || transcript.trim() === '') {
+      showPressKitError('Transcription is empty or failed');
+      return;
+    }
+    
+    // Step 2: Extract thumbnail
+    showPressKitProgress('Extracting thumbnail...', 50);
+    const thumbnailResult = await ipcRenderer.invoke('extract-presskit-thumbnail', lastExportedVideoPath);
+    
+    if (!thumbnailResult || !thumbnailResult.success) {
+      showPressKitError(thumbnailResult?.error || 'Failed to extract thumbnail');
+      return;
+    }
+    
+    const thumbnailPath = thumbnailResult.path;
+    
+    // Step 3: Generate press kit
+    showPressKitProgress('Generating press kit with AI...', 75);
+    const presskitResult = await ipcRenderer.invoke('generate-presskit', transcript, thumbnailPath);
+    
+    if (!presskitResult || !presskitResult.success) {
+      showPressKitError(presskitResult?.error || 'Failed to generate press kit');
+      return;
+    }
+    
+    const htmlContent = presskitResult.htmlContent;
+    
+    // Step 4: Save HTML file
+    showPressKitProgress('Saving press kit...', 90);
+    const path = require('path');
+    const fs = require('fs');
+    const videoDir = path.dirname(lastExportedVideoPath);
+    const videoName = path.basename(lastExportedVideoPath, path.extname(lastExportedVideoPath));
+    const presskitPath = path.join(videoDir, `${videoName}_presskit.html`);
+    
+    fs.writeFileSync(presskitPath, htmlContent, 'utf8');
+    
+    showPressKitProgress('Complete!', 100);
+    
+    // Show success after a brief delay
+    setTimeout(() => {
+      showPressKitSuccess(presskitPath);
+    }, 500);
+    
+  } catch (err) {
+    console.error('Press kit generation error:', err);
+    showPressKitError('Error: ' + err.message);
+  }
+}
+
+// Initialize press kit elements
+function initializePressKitElements() {
+  presskitModal = document.getElementById('presskit-modal');
+  closePressKitModal = document.getElementById('closePressKitModal');
+  presskitYesBtn = document.getElementById('presskitYesBtn');
+  presskitNoBtn = document.getElementById('presskitNoBtn');
+  presskitQuestion = document.getElementById('presskit-question');
+  presskitProgress = document.getElementById('presskit-progress');
+  presskitStatus = document.getElementById('presskit-status');
+  presskitProgressBar = document.getElementById('presskit-progress-bar');
+  presskitError = document.getElementById('presskit-error');
+  presskitErrorMessage = document.getElementById('presskit-error-message');
+  presskitErrorClose = document.getElementById('presskit-error-close');
+  presskitSuccess = document.getElementById('presskit-success');
+  presskitSuccessPath = document.getElementById('presskit-success-path');
+  presskitSuccessClose = document.getElementById('presskit-success-close');
+  
+  if (closePressKitModal) {
+    closePressKitModal.addEventListener('click', closePressKitModalFunction);
+  }
+  
+  if (presskitYesBtn) {
+    presskitYesBtn.addEventListener('click', generatePressKitWorkflow);
+  }
+  
+  if (presskitNoBtn) {
+    presskitNoBtn.addEventListener('click', closePressKitModalFunction);
+  }
+  
+  if (presskitErrorClose) {
+    presskitErrorClose.addEventListener('click', closePressKitModalFunction);
+  }
+  
+  if (presskitSuccessClose) {
+    presskitSuccessClose.addEventListener('click', closePressKitModalFunction);
+  }
+  
+  // Close modal on Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && presskitModal && presskitModal.classList.contains('show')) {
+      closePressKitModalFunction();
+    }
+  });
+}
+
+// ===== SETTINGS MODAL FUNCTIONS =====
+
+// Settings modal DOM refs
+let settingsModal, settingsBtn, closeSettingsModal, cancelSettingsBtn, saveSettingsBtn;
+let openaiKeyInput, awsAccessKeyIdInput, awsSecretAccessKeyInput, awsRegionInput;
+let toggleOpenAIKey, toggleAWSSecret, encryptionStatus;
+
+// Validate OpenAI API key
+function validateOpenAIKey(key) {
+  if (!key || key.trim() === '') {
+    return 'API key is required';
+  }
+  if (!key.startsWith('sk-')) {
+    return 'Invalid API key format (should start with sk-)';
+  }
+  if (key.length < 20) {
+    return 'API key appears to be too short';
+  }
+  return null;
+}
+
+// Validate AWS region
+function validateAWSRegion(region) {
+  if (!region || region.trim() === '') {
+    return 'Region is required';
+  }
+  // Basic region format validation (e.g., us-east-1)
+  const regionPattern = /^[a-z]+-[a-z]+-\d+$/;
+  if (!regionPattern.test(region)) {
+    return 'Invalid region format (expected format: us-east-1)';
+  }
+  return null;
+}
+
+// Show error in field
+function showFieldError(fieldId, errorId, message) {
+  const field = document.getElementById(fieldId);
+  const errorEl = document.getElementById(errorId);
+  if (field) field.classList.add('error');
+  if (errorEl) {
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+  }
+}
+
+// Clear error from field
+function clearFieldError(fieldId, errorId) {
+  const field = document.getElementById(fieldId);
+  const errorEl = document.getElementById(errorId);
+  if (field) field.classList.remove('error');
+  if (errorEl) errorEl.style.display = 'none';
+}
+
+// Load settings from storage (masked)
+async function loadSettingsFromStorage() {
+  try {
+    const config = await ipcRenderer.invoke('get-api-config');
+    if (config) {
+      if (config.hasOpenAI && openaiKeyInput) {
+        openaiKeyInput.placeholder = 'API key is configured';
+      }
+      if (config.hasAWS && awsAccessKeyIdInput) {
+        awsAccessKeyIdInput.placeholder = 'Access Key ID is configured';
+      }
+      if (config.hasAWS && awsSecretAccessKeyInput) {
+        awsSecretAccessKeyInput.placeholder = 'Secret Access Key is configured';
+      }
+      if (config.hasRegion && awsRegionInput) {
+        awsRegionInput.value = config.awsRegion;
+      }
+      
+      // Update encryption status
+      if (encryptionStatus) {
+        if (config.encryptionAvailable) {
+          encryptionStatus.textContent = '✓ Encryption is available and credentials are secured';
+          encryptionStatus.className = 'settings-status encrypted';
+        } else {
+          encryptionStatus.textContent = '⚠ Encryption is not available on this system. Credentials will be stored in plain text.';
+          encryptionStatus.className = 'settings-status not-encrypted';
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error loading settings:', err);
+  }
+}
+
+// Open settings modal
+async function openSettingsModal() {
+  if (!settingsModal) {
+    console.error('Settings modal not found!');
+    return;
+  }
+  
+  settingsModal.classList.add('show');
+  
+  // Clear all errors
+  clearFieldError('openaiKeyInput', 'openaiKeyError');
+  clearFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError');
+  clearFieldError('awsSecretAccessKeyInput', 'awsSecretAccessKeyError');
+  clearFieldError('awsRegionInput', 'awsRegionError');
+  
+  // Clear inputs (except region if already set)
+  if (openaiKeyInput) openaiKeyInput.value = '';
+  if (awsAccessKeyIdInput) awsAccessKeyIdInput.value = '';
+  if (awsSecretAccessKeyInput) awsSecretAccessKeyInput.value = '';
+  
+  // Load current settings
+  await loadSettingsFromStorage();
+}
+
+// Close settings modal
+function closeSettingsModalFunction() {
+  if (settingsModal) {
+    settingsModal.classList.remove('show');
+  }
+  // Reset all inputs and errors
+  if (openaiKeyInput) {
+    openaiKeyInput.value = '';
+    openaiKeyInput.type = 'password';
+  }
+  if (awsSecretAccessKeyInput) {
+    awsSecretAccessKeyInput.value = '';
+    awsSecretAccessKeyInput.type = 'password';
+  }
+  clearFieldError('openaiKeyInput', 'openaiKeyError');
+  clearFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError');
+  clearFieldError('awsSecretAccessKeyInput', 'awsSecretAccessKeyError');
+  clearFieldError('awsRegionInput', 'awsRegionError');
+}
+
+// Save settings
+async function saveSettings() {
+  // Clear all errors first
+  clearFieldError('openaiKeyInput', 'openaiKeyError');
+  clearFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError');
+  clearFieldError('awsSecretAccessKeyInput', 'awsSecretAccessKeyError');
+  clearFieldError('awsRegionInput', 'awsRegionError');
+  
+  let hasErrors = false;
+  
+  // Validate OpenAI key
+  const openaiKey = openaiKeyInput ? openaiKeyInput.value.trim() : '';
+  if (openaiKey) {
+    const openaiError = validateOpenAIKey(openaiKey);
+    if (openaiError) {
+      showFieldError('openaiKeyInput', 'openaiKeyError', openaiError);
+      hasErrors = true;
+    }
+  }
+  
+  // Validate AWS credentials (all or none)
+  const awsAccessKeyId = awsAccessKeyIdInput ? awsAccessKeyIdInput.value.trim() : '';
+  const awsSecretAccessKey = awsSecretAccessKeyInput ? awsSecretAccessKeyInput.value.trim() : '';
+  const awsRegion = awsRegionInput ? awsRegionInput.value.trim() : '';
+  
+  if (awsAccessKeyId || awsSecretAccessKey || awsRegion) {
+    if (!awsAccessKeyId) {
+      showFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError', 'Access Key ID is required');
+      hasErrors = true;
+    }
+    if (!awsSecretAccessKey) {
+      showFieldError('awsSecretAccessKeyInput', 'awsSecretAccessKeyError', 'Secret Access Key is required');
+      hasErrors = true;
+    }
+    if (!awsRegion) {
+      showFieldError('awsRegionInput', 'awsRegionError', 'Region is required');
+      hasErrors = true;
+    } else {
+      const regionError = validateAWSRegion(awsRegion);
+      if (regionError) {
+        showFieldError('awsRegionInput', 'awsRegionError', regionError);
+        hasErrors = true;
+      }
+    }
+  }
+  
+  if (hasErrors) {
+    return;
+  }
+  
+  // Save OpenAI key if provided
+  if (openaiKey) {
+    try {
+      const result = await ipcRenderer.invoke('set-openai-key', openaiKey);
+      if (!result.success) {
+        showFieldError('openaiKeyInput', 'openaiKeyError', result.error || 'Failed to save API key');
+        return;
+      }
+    } catch (err) {
+      showFieldError('openaiKeyInput', 'openaiKeyError', 'Error saving API key: ' + err.message);
+      return;
+    }
+  }
+  
+  // Save AWS credentials if provided
+  if (awsAccessKeyId && awsSecretAccessKey && awsRegion) {
+    try {
+      const result = await ipcRenderer.invoke('set-aws-credentials', awsAccessKeyId, awsSecretAccessKey, awsRegion);
+      if (!result.success) {
+        showFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError', result.error || 'Failed to save AWS credentials');
+        return;
+      }
+    } catch (err) {
+      showFieldError('awsAccessKeyIdInput', 'awsAccessKeyIdError', 'Error saving AWS credentials: ' + err.message);
+      return;
+    }
+  }
+  
+  // Success - close modal
+  closeSettingsModalFunction();
+  
+  // Show success message (optional)
+  if (exportStatusEl) {
+    const prevStatus = exportStatusEl.textContent;
+    exportStatusEl.textContent = 'Settings saved successfully';
+    exportStatusEl.style.color = '#4caf50';
+    setTimeout(() => {
+      exportStatusEl.textContent = prevStatus;
+      exportStatusEl.style.color = '#999';
+    }, 2000);
+  }
+}
+
+// Initialize settings elements
+function initializeSettingsElements() {
+  settingsModal = document.getElementById('settings-modal');
+  settingsBtn = document.getElementById('settingsBtn');
+  closeSettingsModal = document.getElementById('closeSettingsModal');
+  cancelSettingsBtn = document.getElementById('cancelSettingsBtn');
+  saveSettingsBtn = document.getElementById('saveSettingsBtn');
+  openaiKeyInput = document.getElementById('openaiKeyInput');
+  awsAccessKeyIdInput = document.getElementById('awsAccessKeyIdInput');
+  awsSecretAccessKeyInput = document.getElementById('awsSecretAccessKeyInput');
+  awsRegionInput = document.getElementById('awsRegionInput');
+  toggleOpenAIKey = document.getElementById('toggleOpenAIKey');
+  toggleAWSSecret = document.getElementById('toggleAWSSecret');
+  encryptionStatus = document.getElementById('encryptionStatus');
+  
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', openSettingsModal);
+  }
+  
+  if (closeSettingsModal) {
+    closeSettingsModal.addEventListener('click', closeSettingsModalFunction);
+  }
+  
+  if (cancelSettingsBtn) {
+    cancelSettingsBtn.addEventListener('click', closeSettingsModalFunction);
+  }
+  
+  if (saveSettingsBtn) {
+    saveSettingsBtn.addEventListener('click', saveSettings);
+  }
+  
+  // Toggle password visibility
+  if (toggleOpenAIKey && openaiKeyInput) {
+    toggleOpenAIKey.addEventListener('click', () => {
+      const isPassword = openaiKeyInput.type === 'password';
+      openaiKeyInput.type = isPassword ? 'text' : 'password';
+      toggleOpenAIKey.textContent = isPassword ? 'Hide' : 'Show';
+    });
+  }
+  
+  if (toggleAWSSecret && awsSecretAccessKeyInput) {
+    toggleAWSSecret.addEventListener('click', () => {
+      const isPassword = awsSecretAccessKeyInput.type === 'password';
+      awsSecretAccessKeyInput.type = isPassword ? 'text' : 'password';
+      toggleAWSSecret.textContent = isPassword ? 'Hide' : 'Show';
+    });
+  }
+  
+  // Close modal on Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && settingsModal && settingsModal.classList.contains('show')) {
+      closeSettingsModalFunction();
+    }
+  });
+}
+
 // Init - wait for DOM to be ready
 document.addEventListener('DOMContentLoaded', () => {
   console.log('DOM loaded, initializing...');
   initializeAudioOutput();
   initializeRecordingElements();
-setupClipDragAndResize();
-renderProjectFiles();
-renderTimeline();
+  initializeSettingsElements();
+  initializePressKitElements();
+  setupClipDragAndResize();
+  renderProjectFiles();
+  renderTimeline();
 });
 
 // Also try immediate initialization as fallback
@@ -1884,6 +2366,8 @@ if (document.readyState === 'loading') {
   console.log('DOM already loaded, initializing immediately');
   initializeAudioOutput();
   initializeRecordingElements();
+  initializeSettingsElements();
+  initializePressKitElements();
   setupClipDragAndResize();
   renderProjectFiles();
   renderTimeline();

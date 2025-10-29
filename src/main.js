@@ -168,6 +168,104 @@ ipcMain.handle('save-recording', async (event, blobData) => {
   }
 });
 
+// IPC: Credential management handlers
+const configManager = require('./main/config-manager');
+
+// Check if encryption is available
+ipcMain.handle('check-encryption-available', async () => {
+  return configManager.isEncryptionAvailable();
+});
+
+// Get masked config for display
+ipcMain.handle('get-api-config', async () => {
+  return configManager.getMaskedConfig();
+});
+
+// Set OpenAI API key
+ipcMain.handle('set-openai-key', async (event, key) => {
+  try {
+    configManager.setOpenAIKey(key);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Set AWS credentials
+ipcMain.handle('set-aws-credentials', async (event, accessKeyId, secretAccessKey, region) => {
+  try {
+    configManager.setAWSCredentials(accessKeyId, secretAccessKey, region);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Get OpenAI key (for API calls)
+ipcMain.handle('get-openai-key', async () => {
+  const key = configManager.getOpenAIKey();
+  return key ? { success: true, key } : { success: false, error: 'No API key configured' };
+});
+
+// Get AWS credentials (for API calls)
+ipcMain.handle('get-aws-credentials', async () => {
+  const creds = configManager.getAWSCredentials();
+  return creds ? { success: true, ...creds } : { success: false, error: 'No AWS credentials configured' };
+});
+
+// Check if credentials are configured
+ipcMain.handle('check-credentials-configured', async () => {
+  return configManager.hasConfiguredCredentials();
+});
+
+// IPC: Transcribe video
+ipcMain.handle('transcribe-video', async (event, videoPath) => {
+  try {
+    const creds = configManager.getAWSCredentials();
+    if (!creds) {
+      return { success: false, error: 'AWS credentials not configured' };
+    }
+    
+    const { transcribeVideo } = require('./main/transcribe-service');
+    const transcript = await transcribeVideo(videoPath, creds);
+    
+    return { success: true, transcript };
+  } catch (err) {
+    console.error('Transcription error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Extract press kit thumbnail
+ipcMain.handle('extract-presskit-thumbnail', async (event, videoPath) => {
+  try {
+    const { extractPressKitThumbnail } = require('./ffmpeg/wrapper');
+    const thumbnailPath = await extractPressKitThumbnail(videoPath);
+    return { success: true, path: thumbnailPath };
+  } catch (err) {
+    console.error('Thumbnail extraction error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Generate press kit
+ipcMain.handle('generate-presskit', async (event, transcription, thumbnailPath) => {
+  try {
+    const key = configManager.getOpenAIKey();
+    if (!key) {
+      return { success: false, error: 'OpenAI API key not configured' };
+    }
+    
+    const { generatePressKit } = require('./main/presskit-generator');
+    const htmlContent = await generatePressKit(transcription, thumbnailPath, key);
+    
+    return { success: true, htmlContent };
+  } catch (err) {
+    console.error('Press kit generation error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
 app.on('window-all-closed', () => {
   cleanupTempDir();
   if (process.platform !== 'darwin') app.quit();
