@@ -158,6 +158,46 @@ async function extractThumbnails(videoPath, outputDir, count, duration) {
   return thumbnails;
 }
 
-module.exports = { getFFmpegPath, exportConcat, cancelExport, extractThumbnails };
+/**
+ * Extract a single high-quality thumbnail from video for press kit
+ * @param {string} videoPath - Path to the video file
+ * @param {number} timestamp - Timestamp in seconds (default: midpoint or first 10%)
+ * @returns {Promise<string>} - Path to the thumbnail file
+ */
+async function extractPressKitThumbnail(videoPath, timestamp = null) {
+  const ffmpegPath = getFFmpegPath();
+  const tempDir = path.join(os.tmpdir(), 'presskit_thumbs_' + Date.now());
+  
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+  
+  // If no timestamp provided, extract from first 10% of video
+  // We'll need to get duration first, but for simplicity, just use 0.1 (first 10 seconds)
+  const outputPath = path.join(tempDir, 'presskit_thumb.jpg');
+  
+  // If timestamp is provided, use it; otherwise default to 10% of video
+  const ssValue = timestamp !== null ? String(timestamp) : '0.1';
+  
+  const args = [
+    '-ss', ssValue,
+    '-i', videoPath,
+    '-vframes', '1',
+    '-q:v', '2', // High quality
+    '-vf', 'scale=1920:-1', // HD width, maintain aspect ratio
+    '-y', // Overwrite output file
+    outputPath
+  ];
+  
+  try {
+    await spawnPromise(ffmpegPath, args);
+    return outputPath;
+  } catch (err) {
+    console.error('Failed to extract press kit thumbnail:', err);
+    throw err;
+  }
+}
+
+module.exports = { getFFmpegPath, exportConcat, cancelExport, extractThumbnails, extractPressKitThumbnail };
 
 
