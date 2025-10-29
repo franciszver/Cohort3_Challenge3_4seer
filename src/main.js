@@ -60,7 +60,7 @@ app.whenReady().then(() => {
 });
 
 // IPC: handle export workflow from renderer
-ipcMain.handle('export-video', async (event, clips) => {
+ipcMain.handle('export-video', async (event, clips, resolution = 'source') => {
   try {
     event.sender.send('export-progress', { message: 'Starting export...' });
     const result = await dialog.showSaveDialog({
@@ -73,7 +73,7 @@ ipcMain.handle('export-video', async (event, clips) => {
     }
     event.sender.send('export-progress', { message: 'Export in progress...' });
     const { exportConcat } = require('./ffmpeg/wrapper');
-    await exportConcat(clips, result.filePath, (p) => {
+    await exportConcat(clips, result.filePath, resolution, (p) => {
       event.sender.send('export-progress', p);
     });
     event.sender.send('export-progress', { message: 'Export complete', color: '#0a0' });

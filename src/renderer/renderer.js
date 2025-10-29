@@ -6,8 +6,9 @@ const { ipcRenderer } = require('electron');
 let importedClips = []; // Clips in the media library
 let timelineClips = []; // Clips on the timeline
 let selectedClipIndex = null;
-let timelineZoom = 50; // pixels per second
+let timelineZoom = 50; // pixels per second (default - will auto-adjust to fill screen)
 let timelineCurrentTime = 0; // Global timeline position (seconds)
+const DEFAULT_FRAME_RATE = 30; // FPS for timecode display
 
 // Recording state management
 let recordingState = {
@@ -22,18 +23,26 @@ let recordingState = {
   audioContext: null,
   analyser: null,
   timerInterval: null,
-  updateInterval: null
+  updateInterval: null,
+  recordingPreviewFrame: null
 };
 
 // DOM refs
 const dropzone = document.getElementById('dropzone');
 const projectFilesList = document.getElementById('project-files-list');
-const trackContent = document.getElementById('track-1-content');
+const track1Content = document.getElementById('track-1-content');
+const track2Content = document.getElementById('track-2-content');
+const timelineScrollWrapper = document.getElementById('timeline-scroll-wrapper');
+const trackContent = track1Content; // Backward compatibility
 const videoEl = document.getElementById('video');
+const previewCanvas = document.getElementById('preview-canvas');
+const previewCtx = previewCanvas.getContext('2d');
 const inPointInput = document.getElementById('inPointInput');
 const outPointInput = document.getElementById('outPointInput');
 const applyTrimBtn = document.getElementById('applyTrimBtn');
 const deleteClipBtn = document.getElementById('deleteClipBtn');
+const muteClipBtn = document.getElementById('muteClipBtn');
+const trackInfoDisplay = document.getElementById('trackInfoDisplay');
 const exportBtn = document.getElementById('exportBtn');
 const exportStatusEl = document.getElementById('exportStatus');
 const exportProgressBar = document.getElementById('exportProgressBar');
@@ -123,17 +132,29 @@ function renderProjectFiles() {
 
 // Render Timeline
 function renderTimeline() {
-  // Clear existing clips (but keep playhead)
-  const existingClips = trackContent.querySelectorAll('.timeline-clip');
-  existingClips.forEach(el => el.remove());
+  // Clear existing clips from both tracks (but keep playhead)
+  const existingClipsTrack1 = track1Content.querySelectorAll('.timeline-clip');
+  existingClipsTrack1.forEach(el => el.remove());
+  const existingClipsTrack2 = track2Content.querySelectorAll('.timeline-clip');
+  existingClipsTrack2.forEach(el => el.remove());
   
+  // Render clips on their respective tracks
   timelineClips.forEach((clip, idx) => {
+    const track = clip.track || 1; // Default to track 1 if not set
+    const targetTrackContent = track === 1 ? track1Content : track2Content;
+    
     const duration = clip.duration || 10;
     const trimmedDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : duration;
     const width = trimmedDuration * timelineZoom;
     
     const el = document.createElement('div');
     el.className = 'timeline-clip';
+    if (track === 2) {
+      el.classList.add('track-2-clip'); // Distinct styling for overlay track
+    }
+    if (clip.muted) {
+      el.classList.add('muted-clip'); // Visual indication for muted clips
+    }
     if (selectedClipIndex === idx) {
       el.classList.add('selected');
     }
@@ -148,11 +169,14 @@ function renderTimeline() {
     
     // Display thumbnails if available
     if (clip.thumbnails && clip.thumbnails.length > 0) {
+      const thumbnailCount = clip.thumbnails.length;
+      const thumbnailWidth = width / thumbnailCount;
       clip.thumbnails.forEach(thumbPath => {
         const img = document.createElement('img');
         img.className = 'timeline-clip-thumbnail';
         img.src = thumbPath;
-        img.style.width = '50px';
+        img.style.width = thumbnailWidth + 'px';
+        img.style.flexShrink = '0';
         thumbContainer.appendChild(img);
       });
     } else if (clip.thumbnailsLoading) {
@@ -207,48 +231,328 @@ function renderTimeline() {
       selectTimelineClip(idx);
     });
     
-    trackContent.appendChild(el);
+    targetTrackContent.appendChild(el);
   });
   
   renderTimelineRuler();
+}
+
+// Preview compositing state
+let previewState = {
+  track1Video: null,
+  track2Video: null,
+  track1Clip: null,
+  track2Clip: null,
+  animationFrame: null,
+  lastTime: 0
+};
+
+// Timeline playback state
+let timelinePlaybackState = {
+  isPlaying: false,
+  playbackStartTime: 0,
+  playbackStartPosition: 0,
+  lastFrameTime: null
+};
+
+// Find active clip at timeline time for a specific track
+function findActiveClipAtTime(trackNum, time) {
+  const trackClips = timelineClips.filter(clip => (clip.track || 1) === trackNum);
+  
+  for (const clip of trackClips) {
+    const clipStart = clip.startTime || 0;
+    const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+    const clipEnd = clipStart + clipDuration;
+    
+    if (time >= clipStart && time < clipEnd) {
+      return clip;
+    }
+  }
+  return null;
+}
+
+// Update composite preview based on current timeline time
+function updateCompositePreview() {
+  if (!previewCanvas || !previewCtx) return;
+  
+  const currentTime = timelineCurrentTime || 0;
+  
+  // Find active clips on both tracks
+  const track1Clip = findActiveClipAtTime(1, currentTime);
+  const track2Clip = findActiveClipAtTime(2, currentTime);
+  
+  // Ensure existing clips have track property (backward compatibility)
+  timelineClips.forEach(clip => {
+    if (!clip.hasOwnProperty('track')) {
+      clip.track = 1; // Default to Track 1
+    }
+  });
+  
+  // Update video elements if clips changed
+  if (track1Clip !== previewState.track1Clip) {
+    previewState.track1Clip = track1Clip;
+    if (track1Clip) {
+      if (!previewState.track1Video) {
+        previewState.track1Video = document.createElement('video');
+        previewState.track1Video.muted = track1Clip.muted || false;
+        previewState.track1Video.addEventListener('loadedmetadata', () => {
+          setupCanvasSize();
+          drawCompositeFrame();
+        });
+      }
+      previewState.track1Video.src = track1Clip.path;
+      previewState.track1Video.muted = track1Clip.muted || false;
+      previewState.track1Video.load();
+    } else {
+      if (previewState.track1Video) {
+        previewState.track1Video.pause();
+        previewState.track1Video.src = '';
+      }
+    }
+  }
+  
+  if (track2Clip !== previewState.track2Clip) {
+    previewState.track2Clip = track2Clip;
+    if (track2Clip) {
+      if (!previewState.track2Video) {
+        previewState.track2Video = document.createElement('video');
+        previewState.track2Video.muted = track2Clip.muted || false;
+        previewState.track2Video.addEventListener('loadedmetadata', () => {
+          setupCanvasSize();
+          drawCompositeFrame();
+        });
+      }
+      previewState.track2Video.src = track2Clip.path;
+      previewState.track2Video.muted = track2Clip.muted || false;
+      previewState.track2Video.load();
+    } else {
+      if (previewState.track2Video) {
+        previewState.track2Video.pause();
+        previewState.track2Video.src = '';
+      }
+    }
+  }
+  
+  // Update video playback positions
+  if (track1Clip && previewState.track1Video) {
+    const clipStart = track1Clip.startTime || 0;
+    const clipLocalTime = currentTime - clipStart;
+    const videoTime = clipLocalTime + (track1Clip.inPoint || 0);
+    
+    if (Math.abs(previewState.track1Video.currentTime - videoTime) > 0.1) {
+      previewState.track1Video.currentTime = videoTime;
+    }
+    
+    if (previewState.track1Video.paused && timelinePlaybackState.isPlaying) {
+      previewState.track1Video.play().catch(() => {
+        // Ignore play() interruptions
+      });
+    } else if (!previewState.track1Video.paused && !timelinePlaybackState.isPlaying) {
+      try {
+        previewState.track1Video.pause();
+      } catch (e) {
+        // Ignore pause errors
+      }
+    }
+  }
+  
+  if (track2Clip && previewState.track2Video) {
+    const clipStart = track2Clip.startTime || 0;
+    const clipLocalTime = currentTime - clipStart;
+    const videoTime = clipLocalTime + (track2Clip.inPoint || 0);
+    
+    if (Math.abs(previewState.track2Video.currentTime - videoTime) > 0.1) {
+      previewState.track2Video.currentTime = videoTime;
+    }
+    
+    if (previewState.track2Video.paused && timelinePlaybackState.isPlaying) {
+      previewState.track2Video.play().catch(() => {
+        // Ignore play() interruptions
+      });
+    } else if (!previewState.track2Video.paused && !timelinePlaybackState.isPlaying) {
+      try {
+        previewState.track2Video.pause();
+      } catch (e) {
+        // Ignore pause errors
+      }
+    }
+  }
+  
+  // Draw composite frame continuously
+  drawCompositeFrame();
+  previewState.lastTime = currentTime;
+}
+
+// Setup canvas size to match container
+function setupCanvasSize() {
+  if (!previewCanvas) return;
+  const container = previewCanvas.parentElement;
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+  previewCanvas.width = width;
+  previewCanvas.height = height;
+}
+
+// Draw composite frame (Track 1 + Track 2 PIP overlay)
+function drawCompositeFrame() {
+  if (!previewCtx || !previewCanvas) return;
+  
+  // Ensure canvas is sized
+  if (previewCanvas.width === 0 || previewCanvas.height === 0) {
+    setupCanvasSize();
+  }
+  
+  const width = previewCanvas.width;
+  const height = previewCanvas.height;
+  
+  if (width === 0 || height === 0) return;
+  
+  // Clear canvas
+  previewCtx.fillStyle = '#000';
+  previewCtx.fillRect(0, 0, width, height);
+  
+  // During recording, show the live recording stream instead of timeline clips
+  if (recordingState.isRecording && videoEl && videoEl.srcObject) {
+    // Ensure video is playing
+    if (videoEl.paused) {
+      videoEl.play().catch(() => {});
+    }
+    
+    // Wait for video to be ready, but still try to draw even if readyState < 2
+    if (videoEl.readyState >= 1 && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+      const aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+      let drawWidth = width;
+      let drawHeight = height;
+      
+      // Maintain aspect ratio
+      if (width / height > aspectRatio) {
+        drawWidth = height * aspectRatio;
+      } else {
+        drawHeight = width / aspectRatio;
+      }
+      
+      const x = (width - drawWidth) / 2;
+      const y = (height - drawHeight) / 2;
+      
+      // Draw the current frame from the video element
+      previewCtx.drawImage(videoEl, x, y, drawWidth, drawHeight);
+      return; // Exit early, don't draw timeline clips during recording
+    }
+  }
+  
+  // Draw Track 1 (main) if available
+  if (previewState.track1Video && previewState.track1Video.readyState >= 2 && previewState.track1Video.videoWidth > 0) {
+    const video1 = previewState.track1Video;
+    const aspectRatio = video1.videoWidth / video1.videoHeight;
+    let drawWidth = width;
+    let drawHeight = height;
+    
+    // Maintain aspect ratio
+    if (width / height > aspectRatio) {
+      drawWidth = height * aspectRatio;
+    } else {
+      drawHeight = width / aspectRatio;
+    }
+    
+    const x = (width - drawWidth) / 2;
+    const y = (height - drawHeight) / 2;
+    
+    previewCtx.drawImage(video1, x, y, drawWidth, drawHeight);
+  }
+  
+  // Draw Track 2 (PIP overlay) if available
+  if (previewState.track2Video && previewState.track2Video.readyState >= 2 && previewState.track2Video.videoWidth > 0) {
+    const video2 = previewState.track2Video;
+    const pipWidth = width * 0.25; // 25% of canvas width
+    const pipHeight = (video2.videoHeight / video2.videoWidth) * pipWidth; // Maintain aspect ratio
+    const pipPadding = 10;
+    const pipX = width - pipWidth - pipPadding; // Bottom-right
+    const pipY = height - pipHeight - pipPadding;
+    
+    previewCtx.drawImage(video2, pipX, pipY, pipWidth, pipHeight);
+  }
+  
+  // Continue animation loop for smooth playback
+  if (previewState.animationFrame) {
+    previewState.animationFrame = requestAnimationFrame(() => {
+      drawCompositeFrame();
+      if (!videoEl.paused) {
+        updateCompositePreview();
+      }
+    });
+  }
 }
 
 // Select a timeline clip
 function selectTimelineClip(idx) {
   selectedClipIndex = idx;
   const clip = timelineClips[idx];
+  if (!clip) return;
   
   // Update properties panel
+  const track = clip.track || 1;
+  if (trackInfoDisplay) {
+    trackInfoDisplay.textContent = track === 1 ? 'Track 1 - Main' : 'Track 2 - Overlay';
+  }
   if (inPointInput) inPointInput.value = clip.inPoint || 0;
   if (outPointInput) outPointInput.value = clip.outPoint || clip.duration || 0;
+  if (muteClipBtn) {
+    muteClipBtn.textContent = clip.muted ? 'Unmute Clip' : 'Mute Clip';
+    muteClipBtn.classList.toggle('muted', clip.muted);
+  }
   
-  // Update visual selection
-  trackContent.querySelectorAll('.timeline-clip').forEach(el => {
+  // Update visual selection (clear all, then select current)
+  track1Content.querySelectorAll('.timeline-clip').forEach(el => {
     el.classList.remove('selected');
   });
-  const selectedEl = trackContent.querySelector(`[data-clip-index="${idx}"]`);
+  track2Content.querySelectorAll('.timeline-clip').forEach(el => {
+    el.classList.remove('selected');
+  });
+  const selectedEl1 = track1Content.querySelector(`[data-clip-index="${idx}"]`);
+  const selectedEl2 = track2Content.querySelector(`[data-clip-index="${idx}"]`);
+  const selectedEl = selectedEl1 || selectedEl2;
   if (selectedEl) {
     selectedEl.classList.add('selected');
   }
   
-  // Load video preview
-  videoEl.src = clip.path;
-  videoEl.muted = false; // Ensure audio is enabled for playback
-  videoEl.load();
-  
-  // Set to start at inPoint
-  videoEl.addEventListener('loadedmetadata', () => {
-    videoEl.currentTime = clip.inPoint || 0;
-    // Verify audio tracks
-    if (videoEl.audioTracks && videoEl.audioTracks.length > 0) {
-      console.log('Video has audio tracks:', videoEl.audioTracks.length);
-    }
-  }, { once: true });
+  // Update composite preview
+  updateCompositePreview();
 }
 
-// Render timeline ruler
+// Format timecode based on zoom level and frame rate
+function formatTimecode(seconds, zoomLevel, frameRate = DEFAULT_FRAME_RATE) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  // Adaptive precision based on zoom level
+  if (zoomLevel < 20) {
+    // Very zoomed out: show only MM:SS
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  } else if (zoomLevel < 50) {
+    // Medium zoom: show HH:MM:SS
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  } else if (zoomLevel < 100) {
+    // Zoomed in: show HH:MM:SS:FF (frame-based, SMPTE standard)
+    const frames = Math.floor((seconds % 1) * frameRate);
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}:${String(frames).padStart(2, '0')}`;
+  } else {
+    // Very zoomed in: show HH:MM:SS:FF with sub-frame precision
+    const frames = Math.floor((seconds % 1) * frameRate);
+    const subFrame = Math.floor(((seconds % 1) * frameRate % 1) * 10);
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}:${String(frames).padStart(2, '0')}.${subFrame}`;
+  }
+}
+
+// Render timeline ruler with improved timecode display
 function renderTimelineRuler() {
-  timelineRuler.innerHTML = '';
+  // Re-query the element in case it wasn't available at script load time
+  const ruler = timelineRuler || document.getElementById('timeline-ruler');
+  if (!ruler) {
+    console.warn('timelineRuler element not found!');
+    return;
+  }
+  ruler.innerHTML = '';
   
   // Calculate total timeline duration
   let totalDuration = 0;
@@ -257,27 +561,108 @@ function renderTimelineRuler() {
     totalDuration = Math.max(totalDuration, clipEnd);
   });
   
-  // Add some padding
-  totalDuration += 5;
+  // Ensure minimum duration for empty timeline or very short projects
+  const minDuration = 30; // At least 30 seconds
+  totalDuration = Math.max(totalDuration, minDuration);
   
-  // Determine marker interval based on zoom
+  // Add padding beyond content for better scrolling (10 seconds worth)
+  totalDuration += 10;
+  
+  // Determine marker interval based on zoom to prevent overlap
+  // Increased minimum spacing to 120px for better readability (prevents squishing)
+  const minPixelSpacing = 120;
+  const calculatedInterval = minPixelSpacing / timelineZoom;
+  
   let interval = 1; // seconds
-  if (timelineZoom < 20) interval = 5;
-  else if (timelineZoom < 40) interval = 2;
+  let majorInterval = 10; // Major markers every 10 seconds
+  if (calculatedInterval > 5) {
+    interval = 5;
+    majorInterval = 30;
+  } else if (calculatedInterval > 2) {
+    interval = 2;
+    majorInterval = 10;
+  } else if (calculatedInterval > 1) {
+    interval = 1;
+    majorInterval = 5;
+  } else if (calculatedInterval > 0.5) {
+    interval = 0.5;
+    majorInterval = 2;
+  } else if (calculatedInterval > 0.1) {
+    interval = 0.1;
+    majorInterval = 1;
+  } else {
+    interval = 0.05;
+    majorInterval = 0.5;
+  }
+  
+  // Determine sub-intervals for frame-level precision when zoomed in
+  let subInterval = null;
+  if (timelineZoom >= 100) {
+    subInterval = 1 / DEFAULT_FRAME_RATE; // One frame at 30fps
+  }
+  
+  // Track marker positions to prevent overlap
+  const markerPositions = new Set();
   
   for (let t = 0; t <= totalDuration; t += interval) {
+    const pixelPos = t * timelineZoom;
+    
+    // Skip if too close to a previous marker (prevent squishing)
+    let tooClose = false;
+    for (const pos of markerPositions) {
+      if (Math.abs(pixelPos - pos) < minPixelSpacing) {
+        tooClose = true;
+        break;
+      }
+    }
+    if (tooClose) continue;
+    
+    markerPositions.add(pixelPos);
+    const isMajorMarker = Math.abs(t % majorInterval) < 0.001; // Check if on major interval
+    
     const marker = document.createElement('div');
-    marker.className = 'ruler-marker';
-    marker.style.left = (t * timelineZoom) + 'px';
+    marker.className = isMajorMarker ? 'ruler-marker major' : 'ruler-marker';
+    marker.style.left = pixelPos + 'px';
     
-    // Format as HH:MM:SS.mmm
-    const hours = Math.floor(t / 3600);
-    const minutes = Math.floor((t % 3600) / 60);
-    const seconds = Math.floor(t % 60);
-    const ms = Math.floor((t % 1) * 1000);
-    marker.textContent = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+    // Format timecode with adaptive precision
+    marker.textContent = formatTimecode(t, timelineZoom);
     
-    timelineRuler.appendChild(marker);
+    ruler.appendChild(marker);
+  }
+  
+  // Add sub-frame markers if very zoomed in (only if not too dense)
+  if (subInterval && timelineZoom >= 100 && interval >= 0.1) {
+    for (let t = 0; t <= totalDuration; t += subInterval) {
+      const pixelPos = t * timelineZoom;
+      
+      // Skip if too close to existing markers
+      let tooClose = false;
+      for (const pos of markerPositions) {
+        if (Math.abs(pixelPos - pos) < 15) { // Smaller threshold for sub-markers
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+      
+      const subMarker = document.createElement('div');
+      subMarker.className = 'ruler-marker sub';
+      subMarker.style.left = pixelPos + 'px';
+      ruler.appendChild(subMarker);
+    }
+  }
+  
+  // Set minimum width - ensure it extends at least to viewport width plus buffer
+  const viewportWidth = timelineScrollWrapper ? timelineScrollWrapper.clientWidth : window.innerWidth;
+  const contentWidth = totalDuration * timelineZoom;
+  const minWidth = Math.max(contentWidth, viewportWidth + 1000); // Viewport + 1000px buffer for smooth scrolling
+  ruler.style.minWidth = minWidth + 'px';
+  ruler.style.width = minWidth + 'px'; // Explicit width for visibility
+  
+  // Also update track content widths to match (so they extend full length too)
+  if (track1Content && track2Content) {
+    track1Content.style.minWidth = minWidth + 'px';
+    track2Content.style.minWidth = minWidth + 'px';
   }
 }
 
@@ -311,16 +696,13 @@ async function addClipFromFile(filePath) {
 }
 
 // Add clip from library to timeline
-async function addClipToTimeline(clipId) {
+async function addClipToTimeline(clipId, track = 1, startTime = null) {
   const sourceClip = importedClips.find(c => c.id === clipId);
   if (!sourceClip) return;
   
-  // Calculate start time (end of last clip)
-  let startTime = 0;
-  if (timelineClips.length > 0) {
-    const lastClip = timelineClips[timelineClips.length - 1];
-    const lastDuration = lastClip.outPoint > 0 ? (lastClip.outPoint - lastClip.inPoint) : lastClip.duration;
-    startTime = (lastClip.startTime || 0) + lastDuration;
+  // If startTime not provided, place at playhead or 0
+  if (startTime === null) {
+    startTime = timelineCurrentTime || 0;
   }
   
   // Create timeline clip (copy from source)
@@ -334,6 +716,8 @@ async function addClipToTimeline(clipId) {
     inPoint: 0,
     outPoint: sourceClip.duration,
     startTime: startTime,
+    track: track, // 1 = main, 2 = overlay
+    muted: false, // Default to unmuted
     thumbnails: [],
     thumbnailsLoading: true,
   };
@@ -343,7 +727,8 @@ async function addClipToTimeline(clipId) {
   
   // Auto-select first clip added to timeline
   if (selectedClipIndex == null) {
-    selectTimelineClip(0);
+    const newIndex = timelineClips.length - 1;
+    selectTimelineClip(newIndex);
   }
   
   // Extract thumbnails in background
@@ -393,27 +778,154 @@ fileInput.addEventListener('change', () => {
 });
 
 // Track content: accept drops from library
-trackContent.addEventListener('dragover', (e) => {
+// Track 1 (Main) drop handler
+track1Content.addEventListener('dragover', (e) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
+  track1Content.classList.add('drag-over-track');
 });
 
-trackContent.addEventListener('drop', (e) => {
-  e.preventDefault();
-  const clipId = e.dataTransfer.getData('text/plain');
-  if (clipId) {
-    addClipToTimeline(clipId);
+track1Content.addEventListener('dragleave', (e) => {
+  // Only remove if we're actually leaving the track area
+  if (!track1Content.contains(e.relatedTarget)) {
+    track1Content.classList.remove('drag-over-track');
   }
 });
 
+track1Content.addEventListener('drop', (e) => {
+  e.preventDefault();
+  track1Content.classList.remove('drag-over-track');
+  const clipId = e.dataTransfer.getData('text/plain');
+  if (clipId) {
+    // Calculate startTime from mouse position
+    const rect = track1Content.getBoundingClientRect();
+    const x = e.clientX - rect.left + track1Content.scrollLeft;
+    const startTime = x / timelineZoom;
+    addClipToTimeline(clipId, 1, startTime);
+  }
+});
+
+// Track 2 (Overlay) drop handler
+track2Content.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  track2Content.classList.add('drag-over-track');
+});
+
+track2Content.addEventListener('dragleave', (e) => {
+  // Only remove if we're actually leaving the track area
+  if (!track2Content.contains(e.relatedTarget)) {
+    track2Content.classList.remove('drag-over-track');
+  }
+});
+
+track2Content.addEventListener('drop', (e) => {
+  e.preventDefault();
+  track2Content.classList.remove('drag-over-track');
+  const clipId = e.dataTransfer.getData('text/plain');
+  if (clipId) {
+    // Calculate startTime from mouse position
+    const rect = track2Content.getBoundingClientRect();
+    const x = e.clientX - rect.left + track2Content.scrollLeft;
+    const startTime = x / timelineZoom;
+    addClipToTimeline(clipId, 2, startTime);
+  }
+});
+
+// Timeline playback function
+function updateTimelinePlayback(currentTime) {
+  if (!timelinePlaybackState.isPlaying) return;
+  
+  const now = currentTime || performance.now() / 1000;
+  
+  if (timelinePlaybackState.lastFrameTime === null) {
+    timelinePlaybackState.lastFrameTime = now;
+    timelinePlaybackState.playbackStartTime = now;
+    timelinePlaybackState.playbackStartPosition = timelineCurrentTime || 0;
+  }
+  
+  const elapsed = now - timelinePlaybackState.playbackStartTime;
+  const newPosition = timelinePlaybackState.playbackStartPosition + elapsed;
+  
+  // Calculate max timeline duration
+  let maxDuration = 0;
+  timelineClips.forEach(clip => {
+    const clipEnd = (clip.startTime || 0) + (clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : (clip.duration || 10));
+    maxDuration = Math.max(maxDuration, clipEnd);
+  });
+  
+  // If we've reached the end, stop playback
+  if (newPosition >= maxDuration) {
+    timelineCurrentTime = maxDuration;
+    stopTimelinePlayback();
+    return;
+  }
+  
+  timelineCurrentTime = newPosition;
+  
+  // Update playhead position
+  if (playhead) {
+    playhead.style.left = (80 + timelineCurrentTime * timelineZoom) + 'px';
+  }
+  
+  // Update composite preview
+  updateCompositePreview();
+  
+  // Schedule next frame
+  if (timelinePlaybackState.isPlaying) {
+    requestAnimationFrame(() => updateTimelinePlayback());
+  }
+}
+
+function startTimelinePlayback() {
+  if (timelinePlaybackState.isPlaying) return;
+  
+  timelinePlaybackState.isPlaying = true;
+  timelinePlaybackState.lastFrameTime = null;
+  playPauseBtn.textContent = '⏸';
+  
+  // Start playback loop
+  updateTimelinePlayback();
+  
+  // Start video elements playing if they have clips
+  if (previewState.track1Video && previewState.track1Clip) {
+    previewState.track1Video.play().catch((e) => {
+      // Ignore play() interruptions - usually happens when play/pause called rapidly
+    });
+  }
+  if (previewState.track2Video && previewState.track2Clip) {
+    previewState.track2Video.play().catch((e) => {
+      // Ignore play() interruptions - usually happens when play/pause called rapidly
+    });
+  }
+}
+
+function stopTimelinePlayback() {
+  if (!timelinePlaybackState.isPlaying) return;
+  
+  timelinePlaybackState.isPlaying = false;
+  timelinePlaybackState.lastFrameTime = null;
+  playPauseBtn.textContent = '▶';
+  
+  // Pause video elements
+  if (previewState.track1Video) {
+    previewState.track1Video.pause();
+  }
+  if (previewState.track2Video) {
+    previewState.track2Video.pause();
+  }
+  
+  // Still update preview once to show current frame
+  updateCompositePreview();
+  drawCompositeFrame();
+}
+
 // Transport controls
 playPauseBtn.addEventListener('click', () => {
-  if (videoEl.paused) {
-    videoEl.play();
-    playPauseBtn.textContent = '⏸';
+  if (timelinePlaybackState.isPlaying) {
+    stopTimelinePlayback();
   } else {
-    videoEl.pause();
-    playPauseBtn.textContent = '▶';
+    startTimelinePlayback();
   }
 });
 
@@ -434,7 +946,7 @@ forwardBtn.addEventListener('click', () => {
   seekToTimelinePosition(newTime);
 });
 
-// Update playhead position
+// Update playhead position and composite preview
 videoEl.addEventListener('timeupdate', () => {
   if (!videoEl.duration) return;
   
@@ -448,33 +960,45 @@ videoEl.addEventListener('timeupdate', () => {
   }
   
   // Update playhead position based on global timeline time
-  playhead.style.left = (timelineCurrentTime * timelineZoom) + 'px';
+  playhead.style.left = (80 + timelineCurrentTime * timelineZoom) + 'px'; // 80px for label width
   
   // Auto-scroll timeline to keep playhead in view
   const playheadPixelPos = timelineCurrentTime * timelineZoom;
-  const containerWidth = trackContent.clientWidth;
-  const scrollLeft = trackContent.scrollLeft;
-  const visibleLeft = scrollLeft;
-  const visibleRight = scrollLeft + containerWidth;
-  
-  // Scale edge threshold based on zoom level (roughly 2 seconds of time at default zoom)
-  const edgeThreshold = 2 * timelineZoom;
-  
-  // If playhead is outside visible area, scroll to center it
-  const targetPos = playheadPixelPos - (containerWidth / 2);
-  if (playheadPixelPos < visibleLeft + edgeThreshold) {
-    // Playhead approaching left edge, scroll left
-    trackContent.scrollLeft = Math.max(0, targetPos);
-  } else if (playheadPixelPos > visibleRight - edgeThreshold) {
-    // Playhead approaching right edge, scroll right
-    trackContent.scrollLeft = Math.max(0, targetPos);
+  if (timelineScrollWrapper) {
+    const containerWidth = timelineScrollWrapper.clientWidth;
+    const scrollLeft = timelineScrollWrapper.scrollLeft;
+    const visibleLeft = scrollLeft;
+    const visibleRight = scrollLeft + containerWidth;
+    const playheadAbsolutePos = 80 + playheadPixelPos; // Account for label width
+    
+    // Scale edge threshold based on zoom level (roughly 2 seconds of time at default zoom)
+    const edgeThreshold = 2 * timelineZoom;
+    
+    // If playhead is outside visible area, scroll to center it
+    const targetPos = playheadPixelPos - (containerWidth / 2);
+    if (playheadAbsolutePos < visibleLeft + edgeThreshold) {
+      // Playhead approaching left edge, scroll left
+      timelineScrollWrapper.scrollLeft = Math.max(0, targetPos);
+    } else if (playheadAbsolutePos > visibleRight - edgeThreshold) {
+      // Playhead approaching right edge, scroll right
+      timelineScrollWrapper.scrollLeft = Math.max(0, targetPos);
+    }
   }
   
-  // Check if we've reached the outPoint of current clip
-  if (clip && clip.outPoint > 0 && videoEl.currentTime >= clip.outPoint) {
+  // Update composite preview
+  updateCompositePreview();
+  
+  // Check if we've reached the end of timeline (simplified - doesn't auto-advance clips in composite mode)
+  // For now, just pause when reaching end
+  const maxDuration = Math.max(...timelineClips.map(clip => {
+    const clipStart = clip.startTime || 0;
+    const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+    return clipStart + clipDuration;
+  }), 0);
+  
+  if (timelineCurrentTime >= maxDuration) {
     videoEl.pause();
-    // Trigger ended event to move to next clip
-    videoEl.dispatchEvent(new Event('ended'));
+    playPauseBtn.textContent = '▶';
   }
 });
 
@@ -492,31 +1016,39 @@ videoEl.addEventListener('ended', () => {
   }
 });
 
-// Timeline click to seek
-trackContent.addEventListener('click', (e) => {
-  if (e.target.classList.contains('timeline-clip') || 
-      e.target.classList.contains('timeline-clip-label') ||
-      e.target.classList.contains('timeline-clip-resize-handle') ||
-      e.target.id === 'playhead') {
-    return;
-  }
-  
-  seekToTimelinePosition(e);
-});
+// Timeline click to seek (works on both tracks)
+function setupTimelineClickSeek() {
+  [track1Content, track2Content].forEach(trackContentEl => {
+    trackContentEl.addEventListener('click', (e) => {
+      if (e.target.classList.contains('timeline-clip') || 
+          e.target.classList.contains('timeline-clip-label') ||
+          e.target.classList.contains('timeline-clip-resize-handle') ||
+          e.target.id === 'playhead') {
+        return;
+      }
+      
+      seekToTimelinePosition(e);
+    });
+  });
+}
 
-// Timeline right-click for context menu
-trackContent.addEventListener('contextmenu', (e) => {
-  // Prevent default browser context menu
-  e.preventDefault();
-  
-  // Don't show menu on resize handles
-  if (e.target.classList.contains('timeline-clip-resize-handle')) {
-    return;
-  }
-  
-  // Show context menu (will determine if split is possible inside showContextMenu)
-  showContextMenu(e);
-});
+// Timeline right-click for context menu (both tracks)
+function setupTimelineContextMenu() {
+  [track1Content, track2Content].forEach(trackContentEl => {
+    trackContentEl.addEventListener('contextmenu', (e) => {
+      // Prevent default browser context menu
+      e.preventDefault();
+      
+      // Don't show menu on resize handles
+      if (e.target.classList.contains('timeline-clip-resize-handle')) {
+        return;
+      }
+      
+      // Show context menu (will determine if split is possible inside showContextMenu)
+      showContextMenu(e);
+    });
+  });
+}
 
 // Playhead dragging
 let isPlayheadDragging = false;
@@ -528,9 +1060,10 @@ playhead.addEventListener('mousedown', (e) => {
 document.addEventListener('mousemove', (e) => {
   if (!isPlayheadDragging) return;
   
-  const rect = trackContent.getBoundingClientRect();
-  const x = e.clientX - rect.left + trackContent.scrollLeft;
-  const time = x / timelineZoom;
+  const rect = timelineScrollWrapper ? timelineScrollWrapper.getBoundingClientRect() : track1Content.getBoundingClientRect();
+  const scrollLeft = timelineScrollWrapper ? timelineScrollWrapper.scrollLeft : track1Content.scrollLeft;
+  const x = e.clientX - rect.left + scrollLeft;
+  const time = Math.max(0, (x - 80) / timelineZoom); // Subtract 80px for label width
   
   seekToTimelinePosition(time);
 });
@@ -542,45 +1075,82 @@ document.addEventListener('mouseup', () => {
 
 // Helper function to seek to a timeline position
 function seekToTimelinePosition(eventOrTime) {
+  // Stop playback if seeking
+  if (timelinePlaybackState.isPlaying) {
+    stopTimelinePlayback();
+  }
+  
   let time;
   
   if (typeof eventOrTime === 'number') {
     time = eventOrTime;
   } else {
-    const rect = trackContent.getBoundingClientRect();
-    const x = eventOrTime.clientX - rect.left + trackContent.scrollLeft;
-    time = x / timelineZoom;
+    // Calculate time from click position, accounting for label width
+    const rect = timelineScrollWrapper ? timelineScrollWrapper.getBoundingClientRect() : track1Content.getBoundingClientRect();
+    const x = eventOrTime.clientX - rect.left + (timelineScrollWrapper ? timelineScrollWrapper.scrollLeft : track1Content.scrollLeft);
+    time = Math.max(0, (x - 80) / timelineZoom); // Subtract 80px for label width
   }
   
-  // Find which clip this time falls into
-  for (let i = 0; i < timelineClips.length; i++) {
-    const clip = timelineClips[i];
-    const clipStart = clip.startTime || 0;
-    const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
-    const clipEnd = clipStart + clipDuration;
-    
-    if (time >= clipStart && time < clipEnd) {
-      // Select the clip if it's not already selected
-      if (selectedClipIndex !== i) {
-        selectTimelineClip(i);
-      }
-      // Seek to the position within this clip
-      const clipLocalTime = clip.inPoint + (time - clipStart);
-      videoEl.currentTime = clipLocalTime;
-      timelineCurrentTime = time;
-      return;
+  timelineCurrentTime = time;
+  timelinePlaybackState.playbackStartPosition = time; // Update playback start position
+  
+  // Update playhead position
+  playhead.style.left = (80 + time * timelineZoom) + 'px';
+  
+  // Find which clip this time falls into (prefer track 1, then track 2)
+  const track1Clip = findActiveClipAtTime(1, time);
+  const track2Clip = findActiveClipAtTime(2, time);
+  
+  // Select clip if found (prefer track 1)
+  if (track1Clip) {
+    const clipIndex = timelineClips.indexOf(track1Clip);
+    if (selectedClipIndex !== clipIndex) {
+      selectTimelineClip(clipIndex);
     }
+    const clipStart = track1Clip.startTime || 0;
+    const clipLocalTime = time - clipStart;
+    const videoTime = clipLocalTime + (track1Clip.inPoint || 0);
+    if (previewState.track1Video) {
+      previewState.track1Video.currentTime = videoTime;
+    }
+    videoEl.currentTime = videoTime;
+  } else if (track2Clip) {
+    const clipIndex = timelineClips.indexOf(track2Clip);
+    if (selectedClipIndex !== clipIndex) {
+      selectTimelineClip(clipIndex);
+    }
+    const clipStart = track2Clip.startTime || 0;
+    const clipLocalTime = time - clipStart;
+    const videoTime = clipLocalTime + (track2Clip.inPoint || 0);
+    if (previewState.track2Video) {
+      previewState.track2Video.currentTime = videoTime;
+    }
+    videoEl.currentTime = videoTime;
+  }
+  
+  // Update composite preview
+  updateCompositePreview();
+  drawCompositeFrame();
+}
+
+// Update zoom level display
+function updateZoomDisplay() {
+  const zoomDisplay = document.getElementById('zoom-level-display');
+  if (zoomDisplay) {
+    zoomDisplay.textContent = `${Math.round(timelineZoom)}px/s`;
   }
 }
 
 // Zoom controls
 zoomInBtn.addEventListener('click', () => {
   timelineZoom = Math.min(200, timelineZoom + 10);
+  updateZoomDisplay();
   renderTimeline();
 });
 
 zoomOutBtn.addEventListener('click', () => {
   timelineZoom = Math.max(10, timelineZoom - 10);
+  updateZoomDisplay();
   renderTimeline();
 });
 
@@ -629,13 +1199,10 @@ if (outPointInput) {
 }
 
 // Recalculate timeline positions after trim changes
+// Note: With free positioning, this is a no-op. Positions are set by user drag/drop.
 function recalculateTimelinePositions() {
-  let currentTime = 0;
-  timelineClips.forEach(clip => {
-    clip.startTime = currentTime;
-    const duration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
-    currentTime += duration;
-  });
+  // No-op: positions are managed manually with free positioning
+  // This function is kept for backward compatibility with existing code
 }
 
 // Delete selected clip from timeline
@@ -673,6 +1240,125 @@ function deleteSelectedClip() {
   console.log('Clip deleted from timeline');
 }
 
+// Detect gaps in timeline
+function detectGaps() {
+  const gaps = [];
+  
+  // Check each track separately
+  for (let trackNum = 1; trackNum <= 2; trackNum++) {
+    const trackClips = timelineClips.filter(clip => (clip.track || 1) === trackNum);
+    if (trackClips.length === 0) continue;
+    
+    // Sort clips by startTime
+    trackClips.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+    
+    // Check gap before first clip
+    const firstClip = trackClips[0];
+    const firstStart = firstClip.startTime || 0;
+    if (firstStart > 0) {
+      gaps.push({
+        track: trackNum,
+        start: 0,
+        end: firstStart,
+        duration: firstStart
+      });
+    }
+    
+    // Check gaps between clips
+    for (let i = 0; i < trackClips.length - 1; i++) {
+      const clip = trackClips[i];
+      const nextClip = trackClips[i + 1];
+      const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+      const clipEnd = (clip.startTime || 0) + clipDuration;
+      const nextStart = nextClip.startTime || 0;
+      
+      if (nextStart > clipEnd) {
+        gaps.push({
+          track: trackNum,
+          start: clipEnd,
+          end: nextStart,
+          duration: nextStart - clipEnd
+        });
+      }
+    }
+  }
+  
+  return gaps;
+}
+
+// Show export warning modal if gaps detected
+function showExportWarningModal(gaps, proceedCallback) {
+  // Create modal if it doesn't exist
+  let modal = document.getElementById('export-gap-warning-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'export-gap-warning-modal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="modal-title">Gaps Detected in Timeline</div>
+          <button class="modal-close" id="closeExportWarningModal">×</button>
+        </div>
+        <div id="export-gap-warning-content" style="padding: 20px;">
+          <p style="color: #e0e0e0; margin-bottom: 15px;">
+            Your timeline contains gaps (empty spaces). These will be filled with black frames in the exported video.
+          </p>
+          <div id="gap-list" style="margin-bottom: 15px; max-height: 200px; overflow-y: auto;">
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 10px;">
+            <button class="settings-btn-secondary" id="cancelExportBtn">Cancel</button>
+            <button class="settings-btn-primary" id="proceedExportBtn">Proceed with Export</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    // Add event listeners
+    document.getElementById('closeExportWarningModal').addEventListener('click', () => {
+      modal.classList.remove('show');
+    });
+    document.getElementById('cancelExportBtn').addEventListener('click', () => {
+      modal.classList.remove('show');
+    });
+    document.getElementById('proceedExportBtn').addEventListener('click', () => {
+      modal.classList.remove('show');
+      if (proceedCallback) proceedCallback();
+    });
+  }
+  
+  // Update gap list
+  const gapList = document.getElementById('gap-list');
+  gapList.innerHTML = '<div style="font-size: 12px; color: #b0b0b0; margin-bottom: 8px;">Gaps found:</div>';
+  gaps.forEach((gap, idx) => {
+    const gapEl = document.createElement('div');
+    gapEl.style.cssText = 'font-size: 11px; color: #999; margin-bottom: 4px; padding: 4px; background: #1f1f1f; border-radius: 3px;';
+    const startStr = formatTime(gap.start);
+    const endStr = formatTime(gap.end);
+    const durationStr = formatTime(gap.duration);
+    gapEl.textContent = `Track ${gap.track}: ${durationStr} gap from ${startStr} to ${endStr}`;
+    gapList.appendChild(gapEl);
+  });
+  
+  modal.classList.add('show');
+}
+
+// Helper to format time as HH:MM:SS.mmm (for non-timeline display like export warnings)
+// Uses decimal format since it's informational text, not for precise editing
+function formatTime(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  } else {
+    // Shorter format if less than an hour
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  }
+}
+
 // Export
 function exportConcatenated() {
   if (timelineClips.length === 0) {
@@ -680,8 +1366,26 @@ function exportConcatenated() {
     return;
   }
   
+  // Check for gaps
+  const gaps = detectGaps();
+  if (gaps.length > 0) {
+    // Show warning modal
+    showExportWarningModal(gaps, () => {
+      // User confirmed, proceed with export
+      performExport();
+    });
+    return;
+  }
+  
+  // No gaps, proceed directly
+  performExport();
+}
+
+function performExport() {
   setExportStatus('Starting export...', '#4a9eff');
-  ipcRenderer.invoke('export-video', timelineClips)
+  const resolutionSelect = document.getElementById('export-resolution-select');
+  const resolution = resolutionSelect ? resolutionSelect.value : 'source';
+  ipcRenderer.invoke('export-video', timelineClips, resolution)
     .then((response) => {
       if (response && response.success) {
         setExportStatus('Export completed: ' + (response.path || 'unknown'), '#4caf50');
@@ -697,6 +1401,19 @@ function exportConcatenated() {
 }
 
 exportBtn?.addEventListener('click', exportConcatenated);
+
+// Mute/Unmute clip button
+if (muteClipBtn) {
+  muteClipBtn.addEventListener('click', () => {
+    if (selectedClipIndex !== null && timelineClips[selectedClipIndex]) {
+      const clip = timelineClips[selectedClipIndex];
+      clip.muted = !clip.muted;
+      muteClipBtn.textContent = clip.muted ? 'Unmute Clip' : 'Mute Clip';
+      muteClipBtn.classList.toggle('muted', clip.muted);
+      renderTimeline(); // Re-render to update muted visual
+    }
+  });
+}
 
 // Delete clip button
 if (deleteClipBtn) {
@@ -850,13 +1567,17 @@ function splitClipAtTimelineTime(clipIndex, timelineTime) {
     return;
   }
   
-  // Store original outPoint for right clip
+  // Store original outPoint for right clip (before modifying left clip)
   const originalOutPoint = clip.outPoint;
+  const leftClipDuration = localSplitTime - clip.inPoint;
   
-  // Modify left clip (existing clip)
+  // Modify left clip (existing clip) - keeps original track and properties
   clip.outPoint = localSplitTime;
   
-  // Create right clip (new clip)
+  // Calculate right clip start time (right after left clip ends on same track)
+  const rightClipStartTime = clipStart + leftClipDuration;
+  
+  // Create right clip (new clip) - preserve track and muted properties
   const rightClip = {
     id: 'timeline_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
     sourceId: clip.sourceId,
@@ -866,7 +1587,9 @@ function splitClipAtTimelineTime(clipIndex, timelineTime) {
     duration: clip.duration,
     inPoint: localSplitTime,
     outPoint: originalOutPoint,
-    startTime: 0, // Will be recalculated
+    startTime: rightClipStartTime, // Position right after left clip ends on same track
+    track: clip.track || 1, // Preserve original track (important!)
+    muted: clip.muted || false, // Preserve muted state
     thumbnails: [],
     thumbnailsLoading: true
   };
@@ -939,9 +1662,104 @@ let dragState = {
   originalOutPoint: 0,
 };
 
+// Helper to find clip element on either track
+function findClipElement(clipIndex) {
+  const el1 = track1Content.querySelector(`[data-clip-index="${clipIndex}"]`);
+  const el2 = track2Content.querySelector(`[data-clip-index="${clipIndex}"]`);
+  return el1 || el2;
+}
+
+// Helper to get track content for a clip
+function getTrackContentForClip(clipIndex) {
+  const clip = timelineClips[clipIndex];
+  if (!clip) return track1Content;
+  const track = clip.track || 1;
+  return track === 1 ? track1Content : track2Content;
+}
+
+// Smart snapping helper - returns snapped time or original time
+function smartSnap(time, excludeClipIndex, track, shiftKey) {
+  if (shiftKey) return time; // Free positioning with Shift
+  
+  const snapThreshold = 10 / timelineZoom; // ~10 pixels in time units
+  let snappedTime = time;
+  
+  // Snap to playhead
+  const playheadDiff = Math.abs(time - timelineCurrentTime);
+  if (playheadDiff < snapThreshold) {
+    snappedTime = timelineCurrentTime;
+  }
+  
+  // Snap to ruler markers
+  let interval = 1;
+  if (timelineZoom < 20) interval = 5;
+  else if (timelineZoom < 40) interval = 2;
+  const rulerSnap = Math.round(time / interval) * interval;
+  if (Math.abs(time - rulerSnap) < snapThreshold) {
+    snappedTime = rulerSnap;
+  }
+  
+  // Snap to clip edges on same track
+  timelineClips.forEach((otherClip, idx) => {
+    if (idx === excludeClipIndex || (otherClip.track || 1) !== track) return;
+    const otherStart = otherClip.startTime || 0;
+    const otherDuration = otherClip.outPoint > 0 ? (otherClip.outPoint - otherClip.inPoint) : otherClip.duration;
+    const otherEnd = otherStart + otherDuration;
+    
+    // Snap to start
+    if (Math.abs(time - otherStart) < snapThreshold) {
+      snappedTime = otherStart;
+    }
+    // Snap to end
+    if (Math.abs(time - otherEnd) < snapThreshold) {
+      snappedTime = otherEnd;
+    }
+  });
+  
+  return snappedTime;
+}
+
+// Check for overlap on same track
+function checkOverlap(clipIndex, newStartTime, clipDuration, track) {
+  const newEndTime = newStartTime + clipDuration;
+  
+  for (let i = 0; i < timelineClips.length; i++) {
+    if (i === clipIndex) continue;
+    const otherClip = timelineClips[i];
+    if ((otherClip.track || 1) !== track) continue; // Only check same track
+    
+    const otherStart = otherClip.startTime || 0;
+    const otherDuration = otherClip.outPoint > 0 ? (otherClip.outPoint - otherClip.inPoint) : otherClip.duration;
+    const otherEnd = otherStart + otherDuration;
+    
+    // Check for overlap
+    if (newStartTime < otherEnd && newEndTime > otherStart) {
+      return true; // Overlap detected
+    }
+  }
+  return false;
+}
+
 // Setup drag and resize handlers
+// Setup synchronized scrolling between tracks
+function setupSynchronizedScrolling() {
+  if (!track1Content || !track2Content || !timelineScrollWrapper) return;
+  
+  // Use the wrapper's scroll since tracks are children
+  // The wrapper already handles scrolling for both tracks
+  // This function exists for potential future enhancements
+  let isScrolling = false;
+  
+  timelineScrollWrapper.addEventListener('scroll', () => {
+    if (isScrolling) return;
+    // Tracks scroll together via the wrapper, no action needed
+    // But we could add ruler sync here if needed
+  });
+}
+
 function setupClipDragAndResize() {
-  trackContent.addEventListener('mousedown', (e) => {
+  // Listen on both tracks
+  function handleMouseDown(e, trackContentElement) {
     const clipEl = e.target.closest('.timeline-clip');
     if (!clipEl) return;
     
@@ -960,19 +1778,24 @@ function setupClipDragAndResize() {
       dragState.startWidth = parseFloat(clipEl.style.width);
       dragState.originalInPoint = clip.inPoint;
       dragState.originalOutPoint = clip.outPoint;
+      dragState.originalStartTime = clip.startTime || 0;
       document.body.style.cursor = 'ew-resize';
       return;
     }
     
-    // Otherwise, setup for dragging to reorder
+    // Otherwise, setup for dragging to reposition
     dragState.isDragging = true;
     dragState.draggedClipIndex = clipIndex;
     dragState.startX = e.clientX;
     dragState.startLeft = parseFloat(clipEl.style.left);
+    dragState.originalStartTime = clip.startTime || 0;
     clipEl.style.opacity = '0.6';
     clipEl.style.zIndex = '1000';
     document.body.style.cursor = 'grabbing';
-  });
+  }
+  
+  track1Content.addEventListener('mousedown', (e) => handleMouseDown(e, track1Content));
+  track2Content.addEventListener('mousedown', (e) => handleMouseDown(e, track2Content));
   
   document.addEventListener('mousemove', (e) => {
     if (dragState.isResizing) {
@@ -994,19 +1817,22 @@ function setupClipDragAndResize() {
 function handleResize(e) {
   const clipIndex = dragState.draggedClipIndex;
   const clip = timelineClips[clipIndex];
-  const clipEl = trackContent.querySelector(`[data-clip-index="${clipIndex}"]`);
+  const clipEl = findClipElement(clipIndex);
   if (!clip || !clipEl) return;
   
   const deltaX = e.clientX - dragState.startX;
   const deltaTime = deltaX / timelineZoom;
   
   if (dragState.resizeHandle === 'left') {
-    // Resize left edge (adjust inPoint)
+    // Resize left edge (adjust inPoint and startTime)
     const newInPoint = Math.max(0, dragState.originalInPoint + deltaTime);
     const maxInPoint = clip.duration - 0.1; // Minimum 0.1s duration
     
     if (newInPoint < maxInPoint) {
       clip.inPoint = newInPoint;
+      // Adjust startTime to keep visual position correct when trimming inPoint
+      const inPointChange = newInPoint - dragState.originalInPoint;
+      clip.startTime = dragState.originalStartTime + inPointChange;
       
       // Update visual
       const trimmedDuration = clip.outPoint - clip.inPoint;
@@ -1053,44 +1879,49 @@ function finishResize() {
 
 function handleDrag(e) {
   const clipIndex = dragState.draggedClipIndex;
-  const clipEl = trackContent.querySelector(`[data-clip-index="${clipIndex}"]`);
-  if (!clipEl) return;
+  const clip = timelineClips[clipIndex];
+  const clipEl = findClipElement(clipIndex);
+  if (!clip || !clipEl) return;
   
-  const deltaX = e.clientX - dragState.startX;
-  const newLeft = dragState.startLeft + deltaX;
-  clipEl.style.left = newLeft + 'px';
+  const trackContentEl = getTrackContentForClip(clipIndex);
+  const rect = trackContentEl.getBoundingClientRect();
+  const x = e.clientX - rect.left + trackContentEl.scrollLeft;
+  let newTime = x / timelineZoom;
+  
+  // Apply smart snapping (check Shift key)
+  const shiftKey = e.shiftKey;
+  const track = clip.track || 1;
+  newTime = smartSnap(newTime, clipIndex, track, shiftKey);
+  
+  // Prevent negative time
+  newTime = Math.max(0, newTime);
+  
+  // Check for overlap on same track
+  const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+  const wouldOverlap = checkOverlap(clipIndex, newTime, clipDuration, track);
+  
+  if (!wouldOverlap) {
+    clip.startTime = newTime;
+    const newLeft = newTime * timelineZoom;
+    clipEl.style.left = newLeft + 'px';
+  }
+  // If overlap, don't update position (clip stays at last valid position)
 }
 
 function finishDrag() {
   const clipIndex = dragState.draggedClipIndex;
-  const clipEl = trackContent.querySelector(`[data-clip-index="${clipIndex}"]`);
+  const clipEl = findClipElement(clipIndex);
   
   if (clipEl) {
     clipEl.style.opacity = '';
     clipEl.style.zIndex = '';
     
-    // Calculate new position in timeline
-    const newLeft = parseFloat(clipEl.style.left);
-    const newTime = newLeft / timelineZoom;
-    
-    // Find where to insert this clip based on time
-    const draggedClip = timelineClips[clipIndex];
-    timelineClips.splice(clipIndex, 1); // Remove from current position
-    
-    // Find insertion point
-    let insertIndex = 0;
-    for (let i = 0; i < timelineClips.length; i++) {
-      if (timelineClips[i].startTime < newTime) {
-        insertIndex = i + 1;
-      }
-    }
-    
-    // Insert at new position
-    timelineClips.splice(insertIndex, 0, draggedClip);
-    
-    // Update selected index if needed
-    if (selectedClipIndex === clipIndex) {
-      selectedClipIndex = insertIndex;
+    // Update clip's startTime from visual position
+    const clip = timelineClips[clipIndex];
+    if (clip) {
+      const newLeft = parseFloat(clipEl.style.left);
+      const newTime = newLeft / timelineZoom;
+      clip.startTime = newTime;
     }
   }
   
@@ -1098,8 +1929,7 @@ function finishDrag() {
   dragState.draggedClipIndex = null;
   document.body.style.cursor = '';
   
-  // Recalculate timeline positions
-  recalculateTimelinePositions();
+  // Re-render to ensure consistency
   renderTimeline();
 }
 
@@ -1438,12 +2268,16 @@ function addLiveClipToTimeline() {
   const liveClipId = 'live_recording_' + Date.now();
   recordingState.liveClipId = liveClipId;
   
-  // Calculate start time (after last clip)
+  // Calculate start time (after last clip on any track)
   let startTime = 0;
   if (timelineClips.length > 0) {
-    const lastClip = timelineClips[timelineClips.length - 1];
-    const lastDuration = lastClip.outPoint > 0 ? (lastClip.outPoint - lastClip.inPoint) : lastClip.duration;
-    startTime = (lastClip.startTime || 0) + lastDuration;
+    // Find the latest end time across all clips on all tracks
+    timelineClips.forEach(clip => {
+      const clipStart = clip.startTime || 0;
+      const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+      const clipEnd = clipStart + clipDuration;
+      startTime = Math.max(startTime, clipEnd);
+    });
   }
   
   const liveClip = {
@@ -1456,6 +2290,8 @@ function addLiveClipToTimeline() {
     inPoint: 0,
     outPoint: 0.1,
     startTime: startTime,
+    track: 1, // Live recordings go to Track 1 (main)
+    muted: false,
     thumbnails: [],
     thumbnailsLoading: false,
     isLive: true
@@ -1480,6 +2316,33 @@ function updateLiveClipDuration() {
   if (liveClip) {
     liveClip.duration = elapsed;
     liveClip.outPoint = elapsed;
+    
+    // Update playhead position to track the recording progress
+    const currentTimelineTime = (liveClip.startTime || 0) + elapsed;
+    timelineCurrentTime = currentTimelineTime;
+    
+    // Update playhead visual position
+    if (playhead) {
+      playhead.style.left = (80 + currentTimelineTime * timelineZoom) + 'px';
+    }
+    
+    // Auto-scroll timeline to keep playhead in view
+    if (timelineScrollWrapper) {
+      const containerWidth = timelineScrollWrapper.clientWidth;
+      const scrollLeft = timelineScrollWrapper.scrollLeft;
+      const playheadPixelPos = currentTimelineTime * timelineZoom;
+      const playheadAbsolutePos = 80 + playheadPixelPos; // Account for label width
+      const visibleLeft = scrollLeft;
+      const visibleRight = scrollLeft + containerWidth;
+      const edgeThreshold = 2 * timelineZoom;
+      
+      if (playheadAbsolutePos < visibleLeft + edgeThreshold || playheadAbsolutePos > visibleRight - edgeThreshold) {
+        // Scroll to keep playhead centered
+        const targetPos = playheadPixelPos - (containerWidth / 2);
+        timelineScrollWrapper.scrollLeft = Math.max(0, targetPos);
+      }
+    }
+    
     renderTimeline();
   }
 }
@@ -1570,15 +2433,38 @@ async function startRecording() {
     // Add live clip to timeline
     addLiveClipToTimeline();
     
+    // Move playhead to where recording starts
+    const liveClip = timelineClips.find(clip => clip.id === recordingState.liveClipId);
+    if (liveClip && liveClip.startTime !== undefined) {
+      seekToTimelinePosition(liveClip.startTime);
+    }
+    
     // Start timer
     recordingState.timerInterval = setInterval(updateRecordingTimer, 1000);
     
     // Connect to video preview
     videoEl.srcObject = combinedStream;
     videoEl.muted = true; // Mute preview to avoid feedback
-    videoEl.play().catch(err => {
-      console.error('Error playing preview:', err);
-    });
+    
+    // Wait for video to be ready, then start playing and preview loop
+    videoEl.addEventListener('loadedmetadata', () => {
+      videoEl.play().catch(err => {
+        console.error('Error playing preview:', err);
+      });
+      // Start recording preview loop after video is ready
+      startRecordingPreview();
+    }, { once: true });
+    
+    // Also try immediately if video is already ready
+    if (videoEl.readyState >= 1) {
+      videoEl.play().catch(err => {
+        console.error('Error playing preview:', err);
+      });
+      startRecordingPreview();
+    } else {
+      // Load the video to trigger loadedmetadata
+      videoEl.load();
+    }
     
   } catch (err) {
     console.error('Error starting recording:', err);
@@ -1589,6 +2475,29 @@ async function startRecording() {
     recordBtn.style.background = '';
     recordBtn.classList.remove('recording-active');
   }
+}
+
+// Start recording preview loop
+function startRecordingPreview() {
+  if (recordingState.recordingPreviewFrame) {
+    cancelAnimationFrame(recordingState.recordingPreviewFrame);
+  }
+  
+  function drawRecordingFrame() {
+    if (!recordingState.isRecording) {
+      recordingState.recordingPreviewFrame = null;
+      return;
+    }
+    
+    // Continuously draw the video frames to canvas
+    drawCompositeFrame();
+    
+    // Use requestAnimationFrame for smooth 60fps updates
+    recordingState.recordingPreviewFrame = requestAnimationFrame(drawRecordingFrame);
+  }
+  
+  // Start the loop immediately
+  drawRecordingFrame();
 }
 
 // Update recording timer
@@ -1625,6 +2534,12 @@ function stopRecording() {
     recordingState.updateInterval = null;
   }
   
+  // Stop recording preview loop
+  if (recordingState.recordingPreviewFrame) {
+    cancelAnimationFrame(recordingState.recordingPreviewFrame);
+    recordingState.recordingPreviewFrame = null;
+  }
+  
   // Update UI
   startRecordingBtn.disabled = false;
   recordingIndicator.classList.remove('active');
@@ -1636,6 +2551,10 @@ function stopRecording() {
   
   // Stop video preview
   videoEl.srcObject = null;
+  
+  // Return to normal timeline preview
+  updateCompositePreview();
+  drawCompositeFrame();
 }
 
 // Finalize recording and save file
@@ -1660,7 +2579,9 @@ async function finalizeRecording() {
         name: result.fileName,
         duration: recordingState.recordedChunks.length > 0 ? (Date.now() - recordingState.startTime) / 1000 : 10,
         inPoint: 0,
-        outPoint: recordingState.recordedChunks.length > 0 ? (Date.now() - recordingState.startTime) / 1000 : 10
+        outPoint: recordingState.recordedChunks.length > 0 ? (Date.now() - recordingState.startTime) / 1000 : 10,
+        track: 1, // Live recordings go to Track 1 (main)
+        muted: false
       };
       
       importedClips.push(clip);
@@ -1698,6 +2619,13 @@ function finalizeLiveClip(savedClip) {
     liveClip.duration = savedClip.duration;
     liveClip.outPoint = savedClip.outPoint;
     liveClip.isLive = false;
+    // Ensure track and muted properties exist (preserve Track 1 from live recording)
+    if (!liveClip.hasOwnProperty('track')) {
+      liveClip.track = 1; // Live recordings stay on Track 1
+    }
+    if (!liveClip.hasOwnProperty('muted')) {
+      liveClip.muted = false;
+    }
     
     renderTimeline();
     
@@ -2355,8 +3283,24 @@ document.addEventListener('DOMContentLoaded', () => {
   initializeSettingsElements();
   initializePressKitElements();
   setupClipDragAndResize();
+  setupTimelineClickSeek();
+  setupTimelineContextMenu();
+  setupSynchronizedScrolling(); // Sync track scrolling
+  setupCanvasSize(); // Initialize canvas size
+  
+  // Auto-adjust initial zoom to fill screen better
+  if (timelineScrollWrapper && timelineClips.length === 0) {
+    const viewportWidth = timelineScrollWrapper.clientWidth || 800;
+    // Aim for about 30 seconds visible by default (or fill viewport)
+    const targetVisibleDuration = 30;
+    timelineZoom = Math.max(30, (viewportWidth - 100) / targetVisibleDuration);
+  }
+  
+  updateZoomDisplay(); // Initialize zoom display
   renderProjectFiles();
-  renderTimeline();
+  renderTimeline(); // This will also render the ruler
+  renderTimelineRuler(); // Explicitly render ruler to ensure it appears on initial load
+  updateCompositePreview(); // Initial preview update
 });
 
 // Also try immediate initialization as fallback
@@ -2369,6 +3313,22 @@ if (document.readyState === 'loading') {
   initializeSettingsElements();
   initializePressKitElements();
   setupClipDragAndResize();
+  setupTimelineClickSeek();
+  setupTimelineContextMenu();
+  setupSynchronizedScrolling(); // Sync track scrolling
+  setupCanvasSize();
+  
+  // Auto-adjust initial zoom to fill screen better
+  if (timelineScrollWrapper && timelineClips.length === 0) {
+    const viewportWidth = timelineScrollWrapper.clientWidth || 800;
+    // Aim for about 30 seconds visible by default (or fill viewport)
+    const targetVisibleDuration = 30;
+    timelineZoom = Math.max(30, (viewportWidth - 100) / targetVisibleDuration);
+  }
+  
+  updateZoomDisplay(); // Initialize zoom display
   renderProjectFiles();
-  renderTimeline();
+  renderTimeline(); // This will also render the ruler
+  renderTimelineRuler(); // Explicitly render ruler to ensure it appears on initial load
+  updateCompositePreview();
 }
