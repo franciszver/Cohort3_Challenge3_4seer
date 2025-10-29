@@ -735,6 +735,39 @@
           box-shadow: 0 0 10px rgba(244, 67, 54, 0.8);
         }
       }
+
+      /* Context Menu */
+      .context-menu {
+        position: fixed;
+        background: #2a2a2a;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        z-index: 2000;
+        padding: 4px 0;
+        min-width: 150px;
+        display: none;
+      }
+
+      .context-menu.show {
+        display: block;
+      }
+
+      .context-menu-item {
+        padding: 8px 16px;
+        font-size: 12px;
+        color: #e0e0e0;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .context-menu-item:hover {
+        background: #3a3a3a;
+      }
+
+      .context-menu-item:active {
+        background: #4a4a4a;
+      }
     </style>
   </head>
   <body>

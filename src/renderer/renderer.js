@@ -49,6 +49,11 @@ const audioOutputSelect = document.getElementById('audioOutputSelect');
 // Recording DOM refs - will be initialized after DOM loads
 let recordBtn, recordingModal, closeRecordingModal, desktopSourceSelect, webcamSourceSelect, microphoneSourceSelect, webcamToggle, startRecordingBtn, recordingTimer, recordingIndicator;
 
+// Context menu state
+let contextMenu = null;
+let contextMenuClipIndex = null;
+let contextMenuTimelineTime = null;
+
 // File input for click-to-select
 const fileInput = document.createElement('input');
 fileInput.type = 'file';
@@ -499,6 +504,20 @@ trackContent.addEventListener('click', (e) => {
   seekToTimelinePosition(e);
 });
 
+// Timeline right-click for context menu
+trackContent.addEventListener('contextmenu', (e) => {
+  // Prevent default browser context menu
+  e.preventDefault();
+  
+  // Don't show menu on resize handles
+  if (e.target.classList.contains('timeline-clip-resize-handle')) {
+    return;
+  }
+  
+  // Show context menu (will determine if split is possible inside showContextMenu)
+  showContextMenu(e);
+});
+
 // Playhead dragging
 let isPlayheadDragging = false;
 playhead.addEventListener('mousedown', (e) => {
@@ -686,11 +705,205 @@ if (deleteClipBtn) {
   });
 }
 
+// ===== CLIP SPLITTING FUNCTIONS =====
+
+// Show context menu on right-click
+function showContextMenu(event) {
+  // Prevent default browser context menu
+  event.preventDefault();
+  event.stopPropagation();
+  
+  // Create context menu if it doesn't exist
+  if (!contextMenu) {
+    contextMenu = document.createElement('div');
+    contextMenu.id = 'timeline-context-menu';
+    contextMenu.className = 'context-menu';
+    
+    const splitOption = document.createElement('div');
+    splitOption.className = 'context-menu-item';
+    splitOption.id = 'splitClipOption';
+    splitOption.textContent = 'Split Clip';
+    splitOption.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (contextMenuClipIndex !== null && contextMenuTimelineTime !== null) {
+        splitClipAtTimelineTime(contextMenuClipIndex, contextMenuTimelineTime);
+      }
+      hideContextMenu();
+    });
+    
+    contextMenu.appendChild(splitOption);
+    document.body.appendChild(contextMenu);
+  }
+  
+  // Calculate timeline time from click position
+  const rect = trackContent.getBoundingClientRect();
+  const x = event.clientX - rect.left + trackContent.scrollLeft;
+  const timelineTime = x / timelineZoom;
+  
+  // Find which clip contains this timeline position
+  let foundClipIndex = null;
+  for (let i = 0; i < timelineClips.length; i++) {
+    const clip = timelineClips[i];
+    const clipStart = clip.startTime || 0;
+    const clipDuration = clip.outPoint > 0 ? (clip.outPoint - clip.inPoint) : clip.duration;
+    const clipEnd = clipStart + clipDuration;
+    
+    if (timelineTime >= clipStart && timelineTime < clipEnd) {
+      // Check if clip can be split (not a live recording clip)
+      if (clip.isLive) {
+        hideContextMenu();
+        return;
+      }
+      
+      // Calculate local split time within clip
+      const localSplitTime = clip.inPoint + (timelineTime - clipStart);
+      
+      // Validate split is possible (not at boundaries, minimum duration)
+      const leftDuration = localSplitTime - clip.inPoint;
+      const rightDuration = clip.outPoint - localSplitTime;
+      
+      if (leftDuration >= 0.1 && rightDuration >= 0.1 && 
+          localSplitTime > clip.inPoint && localSplitTime < clip.outPoint) {
+        foundClipIndex = i;
+        break;
+      }
+    }
+  }
+  
+  // Only show menu if click is within a splittable clip
+  if (foundClipIndex !== null) {
+    contextMenuClipIndex = foundClipIndex;
+    contextMenuTimelineTime = timelineTime;
+    
+    // Position menu at cursor
+    contextMenu.style.left = event.clientX + 'px';
+    contextMenu.style.top = event.clientY + 'px';
+    contextMenu.classList.add('show');
+    
+    // Add click-outside listener (one-time)
+    setTimeout(() => {
+      document.addEventListener('click', (e) => {
+        // Don't close if clicking on the context menu itself
+        if (contextMenu && contextMenu.contains(e.target)) {
+          return;
+        }
+        // Don't close if clicking on buttons or other interactive elements
+        const isButton = e.target.tagName === 'BUTTON' || e.target.closest('button');
+        const isTransportBtn = e.target.closest('.transport-btn');
+        const isInModal = e.target.closest('#recording-modal') || e.target.closest('.modal-content');
+        
+        if (isButton || isTransportBtn || isInModal) {
+          return;
+        }
+        
+        hideContextMenu();
+      }, { once: true });
+    }, 0);
+  } else {
+    hideContextMenu();
+  }
+}
+
+// Hide context menu
+function hideContextMenu() {
+  if (contextMenu) {
+    contextMenu.classList.remove('show');
+  }
+  contextMenuClipIndex = null;
+  contextMenuTimelineTime = null;
+}
+
+// Split clip at timeline time
+function splitClipAtTimelineTime(clipIndex, timelineTime) {
+  if (clipIndex < 0 || clipIndex >= timelineClips.length) {
+    console.error('Invalid clip index for split');
+    return;
+  }
+  
+  const clip = timelineClips[clipIndex];
+  
+  // Check if clip is live (shouldn't be splittable)
+  if (clip.isLive) {
+    console.warn('Cannot split live recording clip');
+    return;
+  }
+  
+  // Calculate local split time within clip
+  const clipStart = clip.startTime || 0;
+  const localSplitTime = clip.inPoint + (timelineTime - clipStart);
+  
+  // Validate local split time is within clip bounds
+  if (localSplitTime <= clip.inPoint || localSplitTime >= clip.outPoint) {
+    console.error('Split time is at clip boundary');
+    return;
+  }
+  
+  // Validate minimum durations
+  const leftDuration = localSplitTime - clip.inPoint;
+  const rightDuration = clip.outPoint - localSplitTime;
+  
+  if (leftDuration < 0.1 || rightDuration < 0.1) {
+    console.error('Split would create clip shorter than 0.1s');
+    alert('Cannot split: resulting clips would be too short (minimum 0.1s each)');
+    return;
+  }
+  
+  // Store original outPoint for right clip
+  const originalOutPoint = clip.outPoint;
+  
+  // Modify left clip (existing clip)
+  clip.outPoint = localSplitTime;
+  
+  // Create right clip (new clip)
+  const rightClip = {
+    id: 'timeline_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+    sourceId: clip.sourceId,
+    path: clip.path,
+    originalPath: clip.originalPath,
+    name: clip.name,
+    duration: clip.duration,
+    inPoint: localSplitTime,
+    outPoint: originalOutPoint,
+    startTime: 0, // Will be recalculated
+    thumbnails: [],
+    thumbnailsLoading: true
+  };
+  
+  // Insert right clip after left clip
+  timelineClips.splice(clipIndex + 1, 0, rightClip);
+  
+  // Recalculate all timeline positions
+  recalculateTimelinePositions();
+  
+  // Update selected clip index if needed
+  if (selectedClipIndex === clipIndex) {
+    // Keep selection on left clip
+    // No change needed
+  } else if (selectedClipIndex > clipIndex) {
+    // Selection moves down by one index because we inserted a clip
+    selectedClipIndex += 1;
+  }
+  
+  // Trigger thumbnail extraction for new right clip
+  extractThumbnailsForClip(rightClip);
+  
+  // Re-render timeline
+  renderTimeline();
+  
+  console.log('Clip split at timeline time:', timelineTime, 'local time:', localSplitTime);
+}
+
 // Cancel export with Escape key, Delete/Backspace for clip deletion
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    ipcRenderer.send('cancel-export');
-    setExportStatus('Export canceled', '#ff4444');
+    // Close context menu if open
+    if (contextMenu && contextMenu.classList.contains('show')) {
+      hideContextMenu();
+    } else {
+      // Otherwise cancel export
+      ipcRenderer.send('cancel-export');
+      setExportStatus('Export canceled', '#ff4444');
+    }
   } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIndex !== null) {
     // Only delete if not typing in an input field
     if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
