@@ -16,10 +16,12 @@ A lightweight, fast desktop video editor for Windows that validates the core wor
   - Media library panel for imported clips
 
 - **Timeline & Preview**
-  - Single-track timeline with clip positioning
+  - Multi-track timeline with Track 1 (main) and Track 2 (overlay/PIP)
   - Real-time video preview with playback controls
   - Playhead with auto-scroll to keep content in view
   - Time ruler with HH:MM:SS.mmm format
+  - Free positioning with gaps allowed
+  - Gap detection with export warning
 
 - **Trimming**
   - Set in/out points via numeric inputs in Properties panel
@@ -29,9 +31,11 @@ A lightweight, fast desktop video editor for Windows that validates the core wor
 
 - **Clip Manipulation**
   - Drag clips to reorder on timeline
-  - Automatic sequential positioning (no gaps)
+  - Free positioning with gaps allowed
   - Click timeline to seek to position
   - Drag playhead for scrubbing
+  - Per-clip mute/unmute toggle
+  - Track assignment (Track 1 or Track 2)
 
 - **Thumbnails & Visualization**
   - FFmpeg-powered thumbnail extraction
@@ -53,21 +57,44 @@ A lightweight, fast desktop video editor for Windows that validates the core wor
 
 - **Export**
   - Export trimmed clips to MP4
+  - Resolution options: Source, 720p, 1080p
+  - Multi-track export with PIP overlay
   - Automatic clip concatenation
   - H.264/AAC encoding
   - Progress bar with status updates
   - Cancellation support (Escape key)
   - Two-pass export strategy (copy → encode fallback)
+  - Gap filling with black frames
+
+- **Live Recording**
+  - Desktop/window capture
+  - Webcam recording with PIP overlay
+  - Microphone audio capture
+  - Real-time timeline preview
+  - Canvas-based stream compositing
+
+- **AI Press Kit Generation**
+  - Automated video transcription (AWS Transcribe)
+  - AI-powered press kit creation (OpenAI)
+  - Thumbnail extraction for press materials
+  - Professional HTML output
+  - Social media content generation
+
+- **Settings & Configuration**
+  - Secure API credential storage
+  - OpenAI API key management
+  - AWS credentials configuration
+  - Encrypted credential storage (OS keychain)
 
 ### 🚫 Known Limitations
 
-- **Single-track only** - No multi-track editing support
 - **No transitions** - Clips play sequentially without effects
 - **No effects** - No video filters or effects processing
 - **No audio waveforms** - Audio tracks visible only via export
 - **Windows-only** - Cross-platform support planned for future versions
 - **Fixed thumbnail quality** - Low-res thumbnails for performance
 - **No undo/redo** - Changes are immediate and permanent
+- **API dependencies** - Press kit generation requires OpenAI and AWS credentials
 
 ## Installation
 
@@ -109,6 +136,27 @@ npm run build
 ```
 
 The installer will be created in `dist/` directory as `4Seer Setup 1.0.0.exe`
+
+## API Setup (Optional)
+
+To use the AI Press Kit generation feature, you'll need to configure API credentials:
+
+### OpenAI API Setup
+1. Get an API key from [OpenAI](https://platform.openai.com/api-keys)
+2. Open 4Seer and go to Settings (gear icon)
+3. Enter your OpenAI API key
+4. Click "Save Settings"
+
+### AWS Setup
+1. Create an AWS account and S3 bucket
+2. Create IAM user with Transcribe and S3 permissions
+3. In 4Seer Settings, enter:
+   - AWS Access Key ID
+   - AWS Secret Access Key
+   - AWS Region (e.g., us-east-1)
+4. Click "Save Settings"
+
+**Note:** Credentials are encrypted and stored securely using your OS keychain.
 
 ## Creating the Installer
 
@@ -195,6 +243,10 @@ Located in `package.json`:
 4seer/
 ├── src/
 │   ├── main.js              # Electron main process, IPC handlers
+│   ├── main/
+│   │   ├── config-manager.js    # Secure credential storage
+│   │   ├── presskit-generator.js # AI press kit generation
+│   │   └── transcribe-service.js # AWS Transcribe integration
 │   ├── renderer/
 │   │   ├── index.html       # UI layout (4-panel design)
 │   │   └── renderer.js      # All UI logic and interactions
@@ -207,10 +259,9 @@ Located in `package.json`:
 │       └── ffprobe.exe
 ├── dist/                    # Build output (installer)
 ├── _docs/
-│   ├── IMPLEMENTATION_SUMMARY.md
-│   ├── TESTING_GUIDE.md
-│   ├── QUICK_REFERENCE.md
-│   └── plan.plan.md
+│   ├── completed/           # Implementation documentation
+│   ├── action/              # Bug fixes and feature plans
+│   └── timeline-optimization-plan.md
 ├── package.json
 └── README.md
 ```
@@ -224,8 +275,25 @@ Located in `package.json`:
   - `import-file`: Copies selected files to temporary directory
   - `extract-thumbnails`: Calls FFmpeg to generate clip thumbnails
   - `export-video`: Orchestrates video export with FFmpeg
+  - `get-desktop-sources`: Lists available screen/window sources for recording
+  - `save-recording`: Saves recorded video blobs to temp directory
+  - `transcribe-video`: AWS Transcribe integration for video transcription
+  - `generate-presskit`: AI-powered press kit generation
+  - `get-api-config`, `set-openai-key`, `set-aws-credentials`: API credential management
 - **Temp File Management**: Cleanup on app exit
 - **FFmpeg Path Resolution**: Handles both dev and packaged modes
+
+### Configuration Management (`src/main/config-manager.js`)
+
+- **Secure Storage**: Uses Electron's `safeStorage` for encrypted credential storage
+- **API Key Management**: Handles OpenAI and AWS credential storage/retrieval
+- **Encryption**: OS-level encryption (Windows Credential Manager, macOS Keychain)
+- **Validation**: Credential format validation before storage
+
+### AI Services (`src/main/`)
+
+- **Press Kit Generator** (`presskit-generator.js`): OpenAI integration for automated press kit creation
+- **Transcribe Service** (`transcribe-service.js`): AWS Transcribe integration for video transcription
 
 ### Renderer Process (`src/renderer/renderer.js`)
 
@@ -234,17 +302,23 @@ Located in `package.json`:
   - `timelineClips[]`: Clips on the timeline ready for playback/export
   - `timelineCurrentTime`: Global playhead position (seconds)
   - `timelineZoom`: Current zoom level (pixels/second)
+  - `recordingState`: Live recording state management
+  - `lastExportedVideoPath`: Path to last exported video for press kit generation
 
 - **Core Functions**:
   - `renderProjectFiles()`: Displays imported clips in media library
-  - `renderTimeline()`: Renders timeline with clips and thumbnails
+  - `renderTimeline()`: Renders multi-track timeline with clips and thumbnails
   - `addClipFromFile()`: Imports file to library
-  - `addClipToTimeline()`: Adds library clip to timeline
+  - `addClipToTimeline()`: Adds library clip to timeline with track assignment
   - `selectTimelineClip()`: Loads clip for preview/editing
   - `seekToTimelinePosition()`: Seeks to timeline position (handles playhead dragging)
-  - `handleDrag()` / `finishDrag()`: Clip reordering logic
+  - `handleDrag()` / `finishDrag()`: Clip reordering and track assignment logic
   - `handleResize()` / `finishResize()`: Edge-dragging trim logic
   - `extractThumbnailsForClip()`: Background thumbnail generation
+  - `detectGaps()`: Identifies timeline gaps for export warning
+  - `startRecording()` / `stopRecording()`: Live recording functionality
+  - `generatePressKitWorkflow()`: AI press kit generation workflow
+  - `openSettingsModal()`: Settings and credential management
 
 - **Event Listeners**:
   - Drag-and-drop import
@@ -261,24 +335,31 @@ Located in `package.json`:
 │  PROJECT FILES              VIDEO PREVIEW       │
 │  (Media Library)            [Video Player]      │
 │  - Imported clips           [Transport Controls]│
-│  - Drag to timeline         [Playhead Sync]     │
+│  - Drag to timeline         [Record Button]     │
+│  - Settings (gear icon)     [Playhead Sync]     │
 ├─────────────────────────────────────────────────┤
 │  PROPERTIES                 TIMELINE            │
 │  - In Point input           [Time Ruler]        │
-│  - Out Point input          [Track 1]           │
-│  - Apply Trim button        [Clips + Thumbs]    │
+│  - Out Point input          [Track 2 - Overlay] │
+│  - Apply Trim button        [Track 1 - Main]    │
+│  - Mute/Unmute toggle       [Clips + Thumbs]    │
 │  - Export Video button      [Auto-scroll]       │
 │  - Export progress          [Zoom Controls]     │
+│  - Resolution selector      [Gap Detection]     │
 └─────────────────────────────────────────────────┘
 ```
 
 ### FFmpeg Integration (`src/ffmpeg/wrapper.js`)
 
 **Export Workflow:**
-1. **Copy Pass**: Attempt to copy video streams without re-encoding
-2. **Encode Fallback**: If copy fails, re-encode with H.264/AAC
-3. **Concatenation**: Use FFmpeg concat demuxer to join segments
-4. **Output**: Single MP4 file with default presets
+1. **Track Detection**: Determines if export is single-track or multi-track
+2. **Single-Track**: Copy pass → encode fallback → concatenation
+3. **Multi-Track**: 
+   - Create base video from Track 1 with gap filling
+   - Overlay Track 2 clips as PIP (25% width, bottom-right)
+   - Mix audio from both tracks (respects mute settings)
+4. **Resolution Scaling**: Optional 720p/1080p scaling with aspect ratio preservation
+5. **Output**: Single MP4 file with H.264/AAC encoding
 
 **Thumbnail Extraction:**
 - Extracts frames at regular intervals: `duration / (count + 1)`
@@ -399,6 +480,14 @@ ffmpeg -f concat -safe 0 -i segments.txt -c copy <output>
   2. Packaged mode: Reinstall the application
   3. Check Windows Defender hasn't quarantined FFmpeg
 
+### FFmpeg Exit Code 4294967274
+- **Symptom**: "FFmpeg exited with code 4294967274" during multi-track export
+- **Cause**: Audio mapping error when base video has no audio track
+- **Solution**:
+  1. Ensure at least one clip on Track 1 has audio
+  2. Try exporting with different clip combinations
+  3. Check that clips are not all muted
+
 ### Performance Issues
 - **Symptom**: App feels slow, lag when playing or editing
 - **Solution**:
@@ -472,10 +561,16 @@ For issues, questions, or feature requests:
 - Initial MVP release
 - 4-panel OpenShot-style interface
 - Media library workflow
+- Multi-track timeline with PIP overlay
+- Live recording (desktop/webcam/microphone)
+- AI press kit generation
+- Export resolution options (720p, 1080p, source)
+- Settings menu with secure credential storage
 - Direct timeline manipulation (trim, reorder)
 - Thumbnail generation
 - Playhead sync and auto-scroll
 - Export with two-pass strategy
+- Gap detection and warning system
 
 ---
 
