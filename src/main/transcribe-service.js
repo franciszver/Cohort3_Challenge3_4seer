@@ -28,7 +28,11 @@ async function extractAudio(videoPath) {
       audioPath
     ];
     
-    const proc = spawn(ffmpegPath, args, { stdio: 'inherit' });
+    // Hide terminal window on Windows, suppress output for background processing
+    const proc = spawn(ffmpegPath, args, { 
+      stdio: ['ignore', 'ignore', 'pipe'], // Capture stderr for error messages
+      windowsHide: true // Hide terminal window on Windows
+    });
     proc.on('close', (code) => {
       if (code === 0) {
         resolve({ audioPath, tempDir });
