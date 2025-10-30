@@ -23,13 +23,28 @@ function spawnPromise(cmd, args) {
   console.log('FFmpeg args:', args.join(' '));
   
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { stdio: 'inherit' });
+    // Hide terminal window on Windows, suppress output for background processing
+    const spawnOptions = {
+      stdio: ['ignore', 'ignore', 'pipe'], // Capture stderr for error messages, suppress stdout/stdin
+      windowsHide: true // Hide terminal window on Windows
+    };
+    
+    const proc = spawn(cmd, args, spawnOptions);
+    let stderr = '';
+    
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
     proc.on('close', (code) => {
       if (code === 0) {
         resolve();
       } else {
         console.error('FFmpeg failed with code:', code);
         console.error('Command was:', cmd, args.join(' '));
+        if (stderr) {
+          console.error('FFmpeg stderr:', stderr);
+        }
         reject(new Error('FFmpeg exited with code ' + code));
       }
     });
@@ -60,11 +75,14 @@ async function probeVideoResolution(videoPath) {
       videoPath
     ];
     
-    const proc = spawn(ffprobePath, args);
+    // Hide terminal window on Windows
+    const proc = spawn(ffprobePath, args, { 
+      stdio: ['ignore', 'pipe', 'ignore'], // Capture stdout only
+      windowsHide: true // Hide terminal window on Windows
+    });
     let stdout = '';
     
     proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', () => {}); // Ignore stderr
     
     proc.on('close', (code) => {
       if (code === 0) {

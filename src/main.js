@@ -116,8 +116,8 @@ ipcMain.handle('extract-thumbnails', async (event, videoPath, duration) => {
     const tempDirPath = getTempDir();
     const thumbDir = path.join(tempDirPath, 'thumbnails_' + Date.now());
     
-    // Calculate number of thumbnails based on duration (aim for ~50px per thumb)
-    const count = Math.max(5, Math.min(20, Math.floor(duration / 2)));
+    // Limit to exactly 5 thumbnails per clip that will stretch across the entire clip width
+    const count = 5;
     
     const { extractThumbnails } = require('./ffmpeg/wrapper');
     const thumbnails = await extractThumbnails(videoPath, thumbDir, count, duration);
